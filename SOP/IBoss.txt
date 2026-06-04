@@ -1,0 +1,4 @@
+https://www.ibosscloud.com/ibcloud/app/index.html#/cloudHome
+Email:vidhya.v@casepoint.in
+password:arthi2016
+go to web security ->web security policies->Allow lists

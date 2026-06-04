@@ -1,0 +1,24 @@
+Casepoint - ARA (CE - Casepoint E-discovery)							CL - Casepoint Lyra
+
+============================================
+dev - platformdev.casepoint.in 
+	  platformapidev.casepoint.in
+			
+QA - platformqa.casepoint.in 
+	 platformapiqa.casepoint.in
+================================================
+UAT - platformuat.casepoint.com
+	  platformapiuat.casepoint.com
+		
+		
+PT - platformpt.casepoint.com
+	 platformptapi.casepoint.com
+===============================================
+Production - platform.casepoint.com
+			 platformapi.casepoint.com
+================================================
+CG-CE - platform.casepointgov.com
+		platformapi.casepointgov.com
+===============================================
+CE-DOD - https://platformdod.casepointgov.com
+		 https://platformapidod.casepointgov.com

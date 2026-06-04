@@ -1,0 +1,46 @@
+# Secrets & Credentials
+config/secrets.local.ps1
+*.secret
+*.key
+.env.local
+
+# Logs & Temp files
+*.log
+logs/
+temp/
+*.tmp
+
+# State files (should not be committed)
+state/
+*.json.bak
+posted.json
+
+# OS files
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# IDE
+.vscode/
+.idea/
+
+# Build artifacts
+build/
+dist/
+
+# Non-SOC folders (adjust as needed)
+Blue team/
+VAPT/
+Imperva/
+Newsletter/
+Infrastructure/
+Documen*/
+rdm/
+*.zip
+
+# Individual sensitive files
+Filebeat_azureeventhib.txt
+GRAYLOG.txt
+pfesicandgratuityforms.zip
+iocs-*.json

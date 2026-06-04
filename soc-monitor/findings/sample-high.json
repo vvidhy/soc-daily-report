@@ -1,0 +1,13 @@
+{
+  "severity": "HIGH",
+  "title": "Suspected RDP brute force — 47 failures then success",
+  "environment": "PROD-GL",
+  "technique": "T1110.001 Password Guessing",
+  "summary": "Source 203.0.113.42 failed RDP logon to CAES01 47 times in 6 minutes, then succeeded as svc_backup. No prior successful logon from this IP in 30 days. Recommend immediate session kill and credential reset.",
+  "anchor_user": "svc_backup",
+  "anchor_host": "CAES01",
+  "anchor_ip": "203.0.113.42",
+  "anchor_time": "2026-05-28T18:12:04+05:30",
+  "graylog_link": "https://prod-graylog.casepoint.local/search?q=src_ip%3A203.0.113.42",
+  "finding_id": "test-high-001"
+}
