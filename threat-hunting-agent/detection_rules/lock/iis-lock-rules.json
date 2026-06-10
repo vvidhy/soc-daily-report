@@ -1,0 +1,239 @@
+{
+  "version": "1.0",
+  "last_updated": "2026-06-10",
+  "environment": "OP-GL",
+  "description": "LOCK detection rules for IIS behavioral analysis — 17 classes covering all major web attack TTPs",
+  "classes": [
+    {
+      "id": 1,
+      "name": "Injection: SQL Injection",
+      "mitre_id": "T1190",
+      "default_severity": "REVIEW",
+      "retrieval_strategy": "Count HTTP 500 errors from IIS logs in the window. Drill down on new source IPs hitting new URI paths. Server errors from novel sources on novel endpoints suggest injection probing.",
+      "ueba_dimensions": ["anchor_ip", "URI_Stream", "Status"],
+      "ai_prompt_hint": "Does this Status:500 pattern on new URIs from this IP suggest SQL injection probing?",
+      "benign_exceptions": [
+        "Known application bugs that produce 500 on specific endpoints",
+        "Load balancer health-check mismatches",
+        "Nessus scanner IPs in allow_listed_ips"
+      ]
+    },
+    {
+      "id": 2,
+      "name": "Injection: Cross-Site Scripting (XSS)",
+      "mitre_id": "T1059.007",
+      "default_severity": "REVIEW",
+      "retrieval_strategy": "Aggregate POST requests to IIS. Drill on new source IPs sending POSTs with unusually long query strings (>200 chars). Long query strings from new IPs to form endpoints suggest XSS payload injection.",
+      "ueba_dimensions": ["anchor_ip", "URI_Stream", "URI_Query", "Method"],
+      "ai_prompt_hint": "Does this POST with long query string to a form endpoint suggest XSS payload injection?",
+      "benign_exceptions": [
+        "File upload endpoints that accept large payloads",
+        "API endpoints with JWT tokens in body",
+        "Known rich-text editors submitting HTML content"
+      ]
+    },
+    {
+      "id": 3,
+      "name": "Injection: Command / Remote Code Execution",
+      "mitre_id": "T1059",
+      "default_severity": "REVIEW",
+      "retrieval_strategy": "Aggregate HTTP 200s with Time_Taken >5000ms. High latency successful responses from new IPs on new URIs suggest sleep-based command injection or OAST callbacks. Drill to identify pattern.",
+      "ueba_dimensions": ["anchor_ip", "URI_Stream", "Time_Taken", "Status"],
+      "ai_prompt_hint": "Does this high-latency 200 from a new IP on a new URI suggest sleep-based command injection?",
+      "benign_exceptions": [
+        "Report generation endpoints legitimately taking >5s",
+        "Search endpoints with complex queries",
+        "Known batch processing URIs"
+      ]
+    },
+    {
+      "id": 4,
+      "name": "Path Traversal / Local File Inclusion",
+      "mitre_id": "T1083",
+      "default_severity": "REVIEW",
+      "retrieval_strategy": "Search for URI paths containing '..' sequences in IIS logs. Any dot-dot traversal in a URI is anomalous regardless of source IP status. Drill to confirm scope and target files.",
+      "ueba_dimensions": ["anchor_ip", "URI_Stream"],
+      "ai_prompt_hint": "Does this URI path pattern suggest directory traversal or local file inclusion?",
+      "benign_exceptions": [
+        "No known benign exceptions — dot-dot in URI should always be reviewed"
+      ]
+    },
+    {
+      "id": 5,
+      "name": "SSRF / Cloud Metadata Probe",
+      "mitre_id": "T1552.005",
+      "default_severity": "REVIEW",
+      "retrieval_strategy": "Search URI_Query fields for internal IP ranges (169.254.x.x, 127.0.0.x) or localhost. SSRF patterns in query strings are never benign and should always be escalated. Always force REVIEW.",
+      "ueba_dimensions": ["anchor_ip", "URI_Query"],
+      "ai_prompt_hint": "Does this request contain SSRF payloads targeting internal IPs or cloud metadata?",
+      "benign_exceptions": [
+        "No known benign exceptions — SSRF payloads should always be reviewed"
+      ]
+    },
+    {
+      "id": 6,
+      "name": "Exploit Payloads: Log4Shell / SSTI / XXE",
+      "mitre_id": "T1203",
+      "default_severity": "REVIEW",
+      "retrieval_strategy": "Aggregate all IIS traffic, then filter for oversized query strings (>300 chars) from new source IPs. Extreme query string length combined with new source IP suggests exploit payload delivery such as Log4Shell JNDI strings, SSTI templates, or XXE entities.",
+      "ueba_dimensions": ["anchor_ip", "URI_Query", "UserAgent"],
+      "ai_prompt_hint": "Does this oversized query string suggest exploit payload delivery (Log4Shell, SSTI, XXE)?",
+      "benign_exceptions": [
+        "Known search endpoints accepting complex filters",
+        "API endpoints with base64-encoded payloads",
+        "OAuth/SAML assertion endpoints"
+      ]
+    },
+    {
+      "id": 7,
+      "name": "Webshell Behavior",
+      "mitre_id": "T1505.003",
+      "default_severity": "REVIEW",
+      "retrieval_strategy": "Two sub-checks: (7a) POST requests returning HTTP 200 to URIs new in registry suggest webshell command execution. (7b) POST requests returning 200 to static file extensions (jpg/png/css/js/gif) are always suspicious regardless of IP status — static assets do not accept POST.",
+      "ueba_dimensions": ["anchor_ip", "URI_Stream", "Method", "Status"],
+      "ai_prompt_hint": "Does this POST to a new URI or static extension suggest a webshell executing commands?",
+      "benign_exceptions": [
+        "CDN origin callback URIs that may have .js extension",
+        "Known image upload endpoints (7a only, not 7b)"
+      ]
+    },
+    {
+      "id": 8,
+      "name": "Authentication Attacks: 401-Storm",
+      "mitre_id": "T1110",
+      "default_severity": "REVIEW",
+      "retrieval_strategy": "Aggregate HTTP 401 responses in a 15-minute window, then group by source IP. High 401 rates per IP suggest credential stuffing or password spraying. Also check for 200 following 401 pattern from same IP which indicates successful compromise after brute force.",
+      "ueba_dimensions": ["anchor_ip", "Status", "URI_Stream"],
+      "ai_prompt_hint": "Does this IP's 401 rate and target distribution suggest credential stuffing or password spraying?",
+      "benign_exceptions": [
+        "Monitoring agents with stale credentials being refreshed",
+        "Known IP ranges rotating API keys",
+        "Service accounts after password rotation"
+      ]
+    },
+    {
+      "id": 9,
+      "name": "Enumeration / 404 Sweep",
+      "mitre_id": "T1595",
+      "default_severity": "REVIEW",
+      "retrieval_strategy": "Aggregate HTTP 404 responses in 1-hour window. Count unique URI paths per source IP. High breadth of unique 404 URIs from a single IP suggests systematic endpoint enumeration — attackers mapping the application surface before targeted exploitation.",
+      "ueba_dimensions": ["anchor_ip", "URI_Stream", "Status"],
+      "ai_prompt_hint": "Does this breadth of unique 404 URIs suggest systematic endpoint enumeration?",
+      "benign_exceptions": [
+        "Link-checking crawlers from known marketing platforms",
+        "SEO monitoring tools on allow list",
+        "Internal health check misconfiguration"
+      ]
+    },
+    {
+      "id": 10,
+      "name": "Scanner / Automation User-Agent",
+      "mitre_id": "T1595.001",
+      "default_severity": "REVIEW",
+      "retrieval_strategy": "Aggregate User-Agent distribution across IIS traffic. New User-Agents not in entity registry combined with high request volume (>1000 in window) suggest automated scanner activity. Well-known scanner UA strings should auto-promote to REVIEW.",
+      "ueba_dimensions": ["UserAgent", "anchor_ip"],
+      "ai_prompt_hint": "Does this User-Agent and request pattern suggest automated scanning?",
+      "benign_exceptions": [
+        "Known monitoring agents (Pingdom, Datadog, etc.) in allow list",
+        "CI/CD pipeline health checks",
+        "Internal vulnerability scanner IPs in allow_listed_ips"
+      ]
+    },
+    {
+      "id": 11,
+      "name": "CVE / CMS Probe",
+      "mitre_id": "T1190",
+      "default_severity": "REVIEW",
+      "retrieval_strategy": "Search for well-known CVE and CMS-specific path patterns (wp-admin, wp-login, .git, .env, phpinfo, actuator, manager/html). Any of these paths returning HTTP 200 regardless of source IP indicates a serious finding. New IPs accessing any of these paths force REVIEW.",
+      "ueba_dimensions": ["anchor_ip", "URI_Stream", "Status"],
+      "ai_prompt_hint": "Do these path accesses suggest CVE exploitation probing or CMS/admin panel discovery?",
+      "benign_exceptions": [
+        "Penetration testing engagements from pre-approved IP ranges",
+        "Internal vulnerability scanning on allow_listed_ips"
+      ]
+    },
+    {
+      "id": 12,
+      "name": "Protocol Abuse",
+      "mitre_id": "T1071",
+      "default_severity": "REVIEW",
+      "retrieval_strategy": "Aggregate usage of unusual HTTP methods (TRACE, CONNECT, DELETE, PATCH). New source IPs using unusual methods or any IP using more than 5 distinct HTTP methods in the window suggest scanner automation or protocol abuse for reconnaissance.",
+      "ueba_dimensions": ["anchor_ip", "Method"],
+      "ai_prompt_hint": "Does this HTTP method usage pattern suggest protocol abuse or scanner activity?",
+      "benign_exceptions": [
+        "REST API endpoints legitimately using DELETE/PATCH for CRUD operations",
+        "Known API clients registered in entity registry"
+      ]
+    },
+    {
+      "id": 13,
+      "name": "Exfiltration Signals",
+      "mitre_id": "T1030",
+      "default_severity": "REVIEW",
+      "retrieval_strategy": "Aggregate source IPs by request count, then sum bytes_sent per top IP in 1-hour window. Outbound byte volume exceeding threshold (default 50MB/hr per IP) suggests data exfiltration. Correlate with Hmailer stream for email exfil confirmation.",
+      "ueba_dimensions": ["anchor_ip", "bytes_sent"],
+      "ai_prompt_hint": "Does this outbound byte volume suggest data exfiltration?",
+      "benign_exceptions": [
+        "Known backup or reporting jobs with large legitimate downloads",
+        "CDN origin pull IPs in allow list",
+        "Software distribution endpoints with large file downloads"
+      ]
+    },
+    {
+      "id": 14,
+      "name": "Beaconing / C2 Communication",
+      "mitre_id": "T1071.001",
+      "default_severity": "REVIEW",
+      "retrieval_strategy": "Check for the same (source IP + URI) pair appearing consistently across 3 or more consecutive hourly windows. Periodic consistent access to the same endpoint from the same IP with regular timing intervals suggests C2 beaconing.",
+      "ueba_dimensions": ["anchor_ip", "URI_Stream"],
+      "ai_prompt_hint": "Does this IP+URI pair's periodic consistent access suggest C2 beaconing?",
+      "benign_exceptions": [
+        "Monitoring agents polling status endpoints",
+        "Scheduled batch jobs with regular API calls",
+        "Known integration connectors in entity registry"
+      ]
+    },
+    {
+      "id": 15,
+      "name": "First-Occurrence Catch-All",
+      "mitre_id": "T1078",
+      "default_severity": "REVIEW",
+      "retrieval_strategy": "Identify source IPs that first appeared within the last 48 hours and are still active in the current window. New entities not matching existing detection classes but showing activity warrant closer inspection for behaviors not yet covered by Classes 1-14.",
+      "ueba_dimensions": ["anchor_ip"],
+      "ai_prompt_hint": "Is there anything suspicious about this newly-seen entity that does not fit existing classes?",
+      "benign_exceptions": [
+        "Known partner IP ranges being first seen after allow list update",
+        "Internal IPs from new infrastructure deployments",
+        "Developer workstations from new office locations"
+      ]
+    },
+    {
+      "id": 16,
+      "name": "Structural Anomaly / Obfuscation",
+      "mitre_id": "T1027",
+      "default_severity": "REVIEW",
+      "retrieval_strategy": "Filter for extreme URI query string lengths (>500 chars) which may contain encoded payloads or obfuscated exploit strings. Also flag IPs using more than 5 distinct HTTP methods in the window as this suggests automated scanning with method fuzzing.",
+      "ueba_dimensions": ["anchor_ip", "URI_Query", "Method"],
+      "ai_prompt_hint": "Does extreme query string length or multi-method usage suggest encoding obfuscation?",
+      "benign_exceptions": [
+        "GraphQL endpoints with complex nested queries",
+        "Known rich API clients with large serialized payloads",
+        "Search endpoints accepting complex filter expressions"
+      ]
+    },
+    {
+      "id": 17,
+      "name": "AI Open Hunt",
+      "mitre_id": "T1059",
+      "default_severity": "REVIEW",
+      "retrieval_strategy": "GATED: Only executes when Classes 1-16 produced at least one REVIEW or higher finding. Collects up to 20 rows with highest anomaly indicators from the current run. AI reviews for patterns not captured by existing classes. Patterns recurring 3+ times across runs trigger K-phase rule growth and addition to iis-lock-rules.json.",
+      "ueba_dimensions": ["anchor_ip", "URI_Stream", "UserAgent", "Method", "Status"],
+      "ai_prompt_hint": "Are there patterns in these anomalous rows that suggest TTPs not covered by Classes 1-16? If so, describe the pattern, proposed class name, and MITRE technique.",
+      "benign_exceptions": [
+        "Patterns already covered by Classes 1-16",
+        "Noise from known scanning IPs in allow list",
+        "Application-specific behaviors documented in baseline"
+      ]
+    }
+  ]
+}

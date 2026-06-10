@@ -1,0 +1,31 @@
+{
+  "all_thresholds": {
+    "auth_401_per_15min": 20,
+    "enum_404_per_1hr": 50,
+    "exfil_bytes_per_hr": 52428800,
+    "beacon_same_pair_windows": 3
+  },
+  "allow_listed_ips": ["10.102.100.199","10.101.100.160","10.250.100.77","10.220.100.199"],
+  "allow_listed_ips_logged": ["123.253.153.138"],
+  "geo_acl": {
+    "standard": ["US","CA","GB","AU","NZ","IE","IN","DE","FR","ES","IT","NL","SE","NO","DK","FI","PL","CH","AT","BE","CZ","HU","SK"],
+    "ut_prod": ["US"],
+    "epa_pal": ["*"]
+  },
+  "iis_streams": {
+    "prod": "69837caf557da7352164b45c",
+    "uat": "69840794557da7352164ff7c"
+  },
+  "log_filter_drift_threshold": 0.05,
+  "window_hours_default": 1,
+  "correlation_window_minutes": 15,
+  "correlation_streams": {
+    "winlog_beat": "6819eb2b7708cd4fdd4d6a88",
+    "fortigate": "6819f3307708cd4fdd4dad42",
+    "securenvoy": "6819eff37708cd4fdd4d8e36",
+    "external_sftp": "69afd0150e2baec71fdf922a",
+    "internal_sftp": "69afd0420e2baec71fdf9253",
+    "eset_syslog": "68925684b41ef4e3a0f86415",
+    "hmailer": "6882ef3d86e7d1e02b3a8316"
+  }
+}
