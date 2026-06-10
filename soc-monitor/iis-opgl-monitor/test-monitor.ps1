@@ -72,7 +72,7 @@ $webhook = $env:SOC_IIS_OPGL_WEBHOOK
 if ($webhook) { Write-Host ("Routing to dedicated IIS channel (SOC_IIS_OPGL_WEBHOOK ...{0})" -f $webhook.Substring([Math]::Max(0,$webhook.Length-12))) }
 else { Write-Warning 'SOC_IIS_OPGL_WEBHOOK not set - post-to-teams will use the default channel.' }
 
-$postArgs = @{ Path = $file; MinSeverity = 'HIGH' }
+$postArgs = @{ Path = $file; MinSeverity = 'HIGH'; AsAdaptiveCard = $true }
 if ($webhook) { $postArgs['WebhookUrl'] = $webhook }
 if ($DryRun)  { $postArgs['DryRun'] = $true }
 

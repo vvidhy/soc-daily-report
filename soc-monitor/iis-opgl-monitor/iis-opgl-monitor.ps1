@@ -142,7 +142,7 @@ if ($high.Count -gt 0) {
         $webhook = $env:SOC_IIS_OPGL_WEBHOOK
         if (-not $webhook) { Write-IISLog WARN 'K: SOC_IIS_OPGL_WEBHOOK not set - post-to-teams will fall back to default channel' }
 
-        $postArgs = @{ Path = $findingsFile; MinSeverity = 'HIGH' }
+        $postArgs = @{ Path = $findingsFile; MinSeverity = 'HIGH'; AsAdaptiveCard = $true }
         if ($webhook) { $postArgs['WebhookUrl'] = $webhook }
         if ($DryRun)  { $postArgs['DryRun'] = $true }
 

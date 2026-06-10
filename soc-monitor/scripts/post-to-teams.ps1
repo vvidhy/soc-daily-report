@@ -22,6 +22,10 @@ param(
     # monitor) target its own channel without clobbering the shared default.
     [string] $WebhookUrl,
 
+    # Wrap each finding in an Adaptive Card envelope (for Teams "webhook to channel"
+    # workflows that render adaptive cards). Card built by iis-opgl-monitor\alert-card.ps1.
+    [switch] $AsAdaptiveCard,
+
     [switch] $DryRun
 )
 
@@ -35,6 +39,12 @@ $script:webhook = if ($WebhookUrl) { $WebhookUrl } else { $env:SOC_TEAMS_WEBHOOK
 if (-not $script:webhook) {
     Write-Error 'No webhook configured. Pass -WebhookUrl or set SOC_TEAMS_WEBHOOK in config/secrets.local.ps1'
     exit 1
+}
+
+# Adaptive Card builder (only needed when -AsAdaptiveCard).
+if ($AsAdaptiveCard) {
+    $cardLib = Join-Path $root 'iis-opgl-monitor\alert-card.ps1'
+    if (Test-Path $cardLib) { . $cardLib }
 }
 
 $stateDir = Join-Path $root 'state'
@@ -88,7 +98,11 @@ function Test-SeverityGate {
 
 function Send-Finding {
     param($finding)
-    $json = $finding | ConvertTo-Json -Depth 5 -Compress
+    if ($AsAdaptiveCard -and (Get-Command Build-AdaptiveCardEnvelope -ErrorAction SilentlyContinue)) {
+        $json = (Build-AdaptiveCardEnvelope -Finding $finding) | ConvertTo-Json -Depth 25 -Compress
+    } else {
+        $json = $finding | ConvertTo-Json -Depth 5 -Compress
+    }
     $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
 
     $delays = @(0, 2, 8)
