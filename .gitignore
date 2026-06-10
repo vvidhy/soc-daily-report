@@ -17,6 +17,11 @@ state/
 *.json.bak
 posted.json
 
+# IIS OP-GL monitor runtime artifacts (regenerated each run)
+soc-monitor/iis-opgl-monitor/findings/
+**/rate-counters.json
+last-run.json
+
 # OS files
 .DS_Store
 Thumbs.db

@@ -1,4 +1,4 @@
-# alert-html.ps1 — HTML alert presentation for the IIS OP-GL monitor.
+# alert-html.ps1 - HTML alert presentation for the IIS OP-GL monitor.
 #
 # Teams renders a subset of HTML in channel messages (h1-h3, b/i/u, p, br,
 # ul/ol/li, a, table/tr/td/th, blockquote, pre, code). We build a finding into
@@ -12,14 +12,14 @@
 #   $html = Build-FindingHtml -Finding $finding
 #
 # Note: all literal entities are NUMERIC (&#8212; &#8594; &#128308;) so the
-# output is valid XML as well as HTML — keeps it portable across renderers and
+# output is valid XML as well as HTML - keeps it portable across renderers and
 # lets a [xml] well-formedness assertion pass in tests.
 
 $script:DeepInvestUrl = 'https://github.com/mukul975/Anthropic-Cybersecurity-Skills'
-$script:EmDash  = '&#8212;'   # —
-$script:RArrow  = '&#8594;'   # →
+$script:EmDash  = '&#8212;'   # -
+$script:RArrow  = '&#8594;'   # ->
 
-# Severity → leading marker. Only HIGH is alerted today, but map the ladder so
+# Severity -> leading marker. Only HIGH is alerted today, but map the ladder so
 # the same builder works if a lower tier is ever rendered for review.
 $script:SeverityMarker = @{
     HIGH      = '&#128308; HIGH'       # red circle

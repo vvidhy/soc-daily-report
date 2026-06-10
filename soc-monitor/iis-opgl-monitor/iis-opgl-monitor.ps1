@@ -1,0 +1,150 @@
+<#
+  iis-opgl-monitor.ps1 - entry point for the IIS OP-GL behavioral monitor.
+
+  Runs the full LOCK cycle each invocation:
+    L (Learn)   load config + prior dedup context; validate IIS feed integrity
+    O (Observe) load the entity registry (first-occurrence + rate scoring source)
+    C (Check)   Invoke-LockScan - 17 behavioral detection classes over OP-GL
+    K (Keep)    Resolve-KillChain (cross-source correlation -> HIGH),
+                update registry, render HTML, post HIGH findings to Teams
+
+  Alerts fire ONLY for severity == HIGH, routed to the dedicated channel
+  ($env:SOC_IIS_OPGL_WEBHOOK). Dedup is owned by post-to-teams.ps1.
+
+  Runtime note: the detection layer issues mcp__OP-GL__* queries; this script
+  must run in a context where those calls resolve (the SOC claude.exe runtime).
+
+  Params:
+    -Window   look-back window in hours (default 1)
+    -DryRun   run everything but do not POST to Teams (passed to post-to-teams)
+    -TestMode reserved flag for test harness parity
+#>
+[CmdletBinding()]
+param(
+    [int]    $Window = 1,
+    [switch] $DryRun,
+    [switch] $TestMode
+)
+
+$ErrorActionPreference = 'Stop'
+$here     = $PSScriptRoot
+$repoRoot = Split-Path -Parent (Split-Path -Parent $here)   # ...\soc-monitor\iis-opgl-monitor -> repo root
+
+# --- paths ---
+$logDir       = Join-Path $here 'logs'
+$logFile      = Join-Path $logDir 'iis-opgl-monitor.log'
+$findingsDir  = Join-Path $here 'findings'
+$configPath   = Join-Path $here 'config.json'
+$registryPath = Join-Path $repoRoot 'threat-hunting-agent\baselines\iis-opgl\entity-registry.json'
+$postScript   = Join-Path $repoRoot 'soc-monitor\scripts\post-to-teams.ps1'
+$secretsPath  = Join-Path $repoRoot 'soc-monitor\config\secrets.local.ps1'
+$postedPath   = Join-Path $repoRoot 'soc-monitor\state\posted.json'
+
+$null = New-Item -ItemType Directory -Force -Path $logDir, $findingsDir
+
+function Write-IISLog {
+    param([ValidateSet('INFO','WARN','ERROR')][string] $Level, [string] $Message)
+    $line = '{0} [{1}] {2}' -f ([datetime]::UtcNow.ToString('o')), $Level, $Message
+    Add-Content -Path $logFile -Value $line -Encoding utf8
+    if     ($Level -eq 'ERROR') { Write-Host $line -ForegroundColor Red }
+    elseif ($Level -eq 'WARN')  { Write-Host $line -ForegroundColor Yellow }
+    else                        { Write-Verbose $line }
+}
+
+# Count PSCustomObject NoteProperties safely. $obj.PSObject.Properties.Count can
+# return a multi-value Object[] in WinPS 5.1; wrapping in @() forces a scalar.
+function Get-PropCount { param($Obj) if ($null -eq $Obj) { return 0 } return @($Obj.PSObject.Properties).Count }
+
+# --- dependencies (functions only; mcp__ calls happen at runtime inside them) ---
+. (Join-Path $here 'log-validator.ps1')
+. (Join-Path $here 'entity-risk-engine.ps1')
+. (Join-Path $here 'lock-detector.ps1')
+. (Join-Path $here 'alert-html.ps1')
+. (Join-Path $here 'alert-formatter.ps1')
+
+Write-IISLog INFO ("=== SOC IIS OP-GL Monitor start === Window={0}h DryRun={1} TestMode={2}" -f $Window, [bool]$DryRun, [bool]$TestMode)
+
+# ------------------------------------------------------------------ L: Learn
+$config = Get-Content $configPath -Raw -Encoding utf8 | ConvertFrom-Json   # NB: no -Depth (invalid in PS 5.1)
+Write-IISLog INFO 'L: config loaded'
+
+$priorCount = 0
+if (Test-Path $postedPath) {
+    try { $priorCount = Get-PropCount ((Get-Content $postedPath -Raw -Encoding utf8) | ConvertFrom-Json) } catch {}
+}
+Write-IISLog INFO ("L: prior dedup entries={0}" -f $priorCount)
+
+$validation = Invoke-LogValidation -WindowHours $Window -Config $config
+Write-IISLog INFO ("L: total_iis={0} parsed={1} filter_ratio={2} streams={3}" -f `
+    $validation.total_iis_logs, $validation.parsed_logs, [Math]::Round([double]$validation.filter_ratio, 4), ($validation.streams_checked -join ','))
+if ($validation.alert_required) { Write-IISLog WARN ("L: IIS_FILTER_DRIFT filter_ratio={0}" -f $validation.filter_ratio) }
+if ([long]$validation.total_iis_logs -eq 0) { Write-IISLog WARN 'L: no IIS logs in window - aborting scan'; return }
+
+# ------------------------------------------------------------------ O: Observe
+$registry = $null
+if (Test-Path $registryPath) {
+    try { $registry = Get-Content $registryPath -Raw -Encoding utf8 | ConvertFrom-Json } catch { $registry = $null }
+}
+if (-not $registry) { $registry = [PSCustomObject]@{ ips = @{}; users = @{}; uris = @{}; hosts = @{} } }
+Write-IISLog INFO ("O: entity registry loaded ip_count={0}" -f (Get-PropCount $registry.ips))
+
+# ------------------------------------------------------------------ C: Check
+Write-IISLog INFO 'C: Invoke-LockScan (17 behavioral classes)'
+$rawFindings = @(Invoke-LockScan -WindowHours $Window -Config $config -Registry $registry)
+$nonLogged   = @($rawFindings | Where-Object { $_.severity -ne 'LOGGED' })
+Write-IISLog INFO ("C: raw_findings={0} non_logged={1}" -f $rawFindings.Count, $nonLogged.Count)
+
+# ------------------------------------------------------------------ K: Keep
+$findings  = @(Resolve-KillChain -Findings $rawFindings -Config $config)
+$high      = @($findings | Where-Object { $_.severity -eq 'HIGH' })
+$confirmed = @($findings | Where-Object { $_.severity -eq 'CONFIRMED' })
+$review    = @($findings | Where-Object { $_.severity -eq 'REVIEW' })
+Write-IISLog INFO ("K: HIGH={0} CONFIRMED={1} REVIEW={2} LOGGED={3}" -f `
+    $high.Count, $confirmed.Count, $review.Count, @($findings | Where-Object { $_.severity -eq 'LOGGED' }).Count)
+
+try { Update-EntityRegistry -Findings $findings; Write-IISLog INFO 'K: entity registry updated' }
+catch { Write-IISLog ERROR ("K: entity registry update failed: {0}" -f $_.Exception.Message) }
+
+if ($high.Count -gt 0) {
+    $findingsFile = Format-Findings -Findings $high -FindingsDir $findingsDir
+    if (-not $findingsFile) {
+        Write-IISLog WARN 'K: Format-Findings returned no file despite HIGH findings'
+    } else {
+        Write-IISLog INFO ("K: {0} HIGH finding(s) written to {1}" -f $high.Count, $findingsFile)
+        if (Test-Path $secretsPath) { . $secretsPath }
+        $webhook = $env:SOC_IIS_OPGL_WEBHOOK
+        if (-not $webhook) { Write-IISLog WARN 'K: SOC_IIS_OPGL_WEBHOOK not set - post-to-teams will fall back to default channel' }
+
+        $postArgs = @{ Path = $findingsFile; MinSeverity = 'HIGH' }
+        if ($webhook) { $postArgs['WebhookUrl'] = $webhook }
+        if ($DryRun)  { $postArgs['DryRun'] = $true }
+
+        $global:LASTEXITCODE = 0
+        try {
+            & $postScript @postArgs
+            $code = $LASTEXITCODE
+            if ($code -ne 0) { Write-IISLog ERROR ("K: post-to-teams.ps1 exit={0} - delivery FAILED" -f $code) }
+            else { Write-IISLog INFO ("K: posted {0} HIGH finding(s) (dryrun={1})" -f $high.Count, [bool]$DryRun) }
+        } catch {
+            Write-IISLog ERROR ("K: post-to-teams.ps1 threw: {0}" -f $_.Exception.Message)
+        }
+    }
+} else {
+    Write-IISLog INFO 'K: no HIGH findings - no Teams alert'
+}
+
+# Run summary
+$summary = [ordered]@{
+    run_time           = [datetime]::UtcNow.ToString('o')
+    window_hours       = $Window
+    total_iis_logs     = $validation.total_iis_logs
+    parsed_logs        = $validation.parsed_logs
+    filter_ratio       = $validation.filter_ratio
+    filter_drift_alert = $validation.alert_required
+    raw_findings       = $rawFindings.Count
+    review             = $review.Count
+    confirmed          = $confirmed.Count
+    high               = $high.Count
+}
+$summary | ConvertTo-Json -Depth 5 | Out-File (Join-Path $logDir 'last-run.json') -Encoding utf8
+Write-IISLog INFO '=== run complete ==='
