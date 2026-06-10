@@ -61,50 +61,117 @@ function _Invoke-Opus {
     }
 }
 
+# ── Cybersecurity-skill mapping (mukul975/Anthropic-Cybersecurity-Skills) ──
+# On a HIGH finding the deep-dive APPLIES the matching repo skill's methodology
+# (the skills themselves query Graylog via MCP, which an unattended run can't reach,
+# so we feed the skill REST-gathered evidence and have opus apply its method).
+$script:SkillsRepo = 'C:\Users\VidhyaV\.claude\agents\Anthropic-Cybersecurity-Skills\skills'
+$script:ClassSkill = @{
+    1='detecting-sql-injection-via-waf-logs';            2='analyzing-web-server-logs-for-intrusion'
+    3='analyzing-web-server-logs-for-intrusion';         4='analyzing-web-server-logs-for-intrusion'
+    5='exploiting-server-side-request-forgery';          6='analyzing-web-server-logs-for-intrusion'
+    7='hunting-for-webshell-activity';                   8='hunting-credential-stuffing-attacks'
+    9='analyzing-web-server-logs-for-intrusion';        10='analyzing-web-server-logs-for-intrusion'
+    11='analyzing-web-server-logs-for-intrusion';       12='analyzing-web-server-logs-for-intrusion'
+    13='hunting-for-data-exfiltration-indicators';      14='hunting-for-command-and-control-beaconing'
+    15='hunting-for-unusual-network-connections';       16='analyzing-web-server-logs-for-intrusion'
+    17='analyzing-web-server-logs-for-intrusion'
+}
+
+function _Resolve-DeepSkill {
+    param([int] $ClassId)
+    $name = if ($script:ClassSkill.ContainsKey($ClassId)) { $script:ClassSkill[$ClassId] } else { 'analyzing-web-server-logs-for-intrusion' }
+    $path = Join-Path $script:SkillsRepo "$name\SKILL.md"
+    if (-not (Test-Path $path)) { $name = 'analyzing-web-server-logs-for-intrusion'; $path = Join-Path $script:SkillsRepo "$name\SKILL.md" }
+    return @{ name = $name; path = $path }
+}
+
+function _OPGL-CrossStream {
+    # Correlation hunt: pull the anchor's activity across all OP-GL streams (REST).
+    param([psobject] $Config, [string] $Ip, [string] $User)
+    $cs = $Config.correlation_streams
+    $flds = 'source_ip,src_ip,dst_ip,client_ip,account_name,action,policy_name,username,auth_result,filename,alert_name,threat_name,EventID,event_description,from_address,to_address,subject,timestamp'
+    $out = [ordered]@{}
+    $pivots = @(
+        @{ k='Winlog_beat';   sid=$cs.winlog_beat;   q=$(if($Ip -and $Ip -ne '-'){"source_ip:$Ip"}) },
+        @{ k='FortiGate';     sid=$cs.fortigate;     q=$(if($Ip -and $Ip -ne '-'){"src_ip:$Ip OR dst_ip:$Ip"}) },
+        @{ k='Securenvoy';    sid=$cs.securenvoy;    q=$(if($User -and $User -ne '-'){"username:$User"}) },
+        @{ k='External_SFTP'; sid=$cs.external_sftp; q=$(if($Ip -and $Ip -ne '-'){"client_ip:$Ip"}) },
+        @{ k='ESET';          sid=$cs.eset_syslog;   q=$(if($Ip -and $Ip -ne '-'){"source_ip:$Ip"}) },
+        @{ k='Hmailer';       sid=$cs.hmailer;       q=$(if($Ip -and $Ip -ne '-'){"src_ip:$Ip"}) }
+    )
+    foreach ($p in $pivots) {
+        if (-not $p.q -or -not $p.sid) { continue }
+        $rows = @()
+        try { $rows = @((mcp__OP-GL__search_logs_relative -streamId $p.sid -query $p.q -rangeSeconds 3600 -fields $flds -limit 6).messages) } catch {}
+        if ($rows.Count -gt 0) { $out[$p.k] = $rows }
+    }
+    return $out
+}
+
 function Invoke-OpusDeepDive {
     <#
-      TIER 2 - deep investigation of ONE confirmed HIGH finding. Returns an
-      analysis string to attach to the alert (or $null). Does NOT change severity.
+      TIER 2 - deep, SKILL-DRIVEN investigation of ONE confirmed HIGH finding:
+        1. cross-stream correlation hunt (REST) across all OP-GL log sources,
+        2. load the matching Anthropic-Cybersecurity-Skills methodology,
+        3. opus applies that method to the evidence.
+      Returns the analysis (prefixed with the skill used) or $null. Never changes
+      severity; failure/timeout is a no-op (alert still fires on deterministic data).
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][psobject] $Finding,
         [Parameter(Mandatory)][psobject] $Config
     )
+    if (-not (Get-Command mcp__OP-GL__search_logs_relative -ErrorAction SilentlyContinue)) { return $null }
     $ip  = $Finding.anchor_ip
     $sid = $Config.iis_streams.prod
 
-    # Bounded evidence: up to 15 of the anchor IP's recent IIS requests.
-    $rows = @()
-    if ($ip -and $ip -ne '-' -and (Get-Command mcp__OP-GL__search_logs_relative -ErrorAction SilentlyContinue)) {
-        try {
-            $r = mcp__OP-GL__search_logs_relative -streamId $sid `
-                    -query "Client_ip:$ip AND filebeat_log_file_path:*inetpub*" `
-                    -rangeSeconds 3600 -fields 'Method,Status,URI_Stream,URI_Query,Host,UserAgent,Time_Taken' -limit 15
-            $rows = @($r.messages)
-        } catch {}
+    # Anchor's IIS activity
+    $iisRows = @()
+    if ($ip -and $ip -ne '-') {
+        try { $iisRows = @((mcp__OP-GL__search_logs_relative -streamId $sid -query "Client_ip:$ip AND filebeat_log_file_path:*inetpub*" -rangeSeconds 3600 -fields 'Method,Status,URI_Stream,URI_Query,Host,UserAgent,Time_Taken' -limit 15).messages) } catch {}
     }
-    $evidence = ($rows | Select-Object Method,Status,URI_Stream,URI_Query,Host,UserAgent,Time_Taken | ConvertTo-Json -Compress)
-    if (-not $evidence) { $evidence = '(no additional rows retrieved)' }
+    $iisJson = if ($iisRows.Count) { ($iisRows | ConvertTo-Json -Compress -Depth 4) } else { '(none)' }
+
+    # Cross-stream correlation hunt
+    $cross = _OPGL-CrossStream -Config $Config -Ip $ip -User $Finding.anchor_user
+    $crossJson = if (@($cross.Keys).Count) { ($cross | ConvertTo-Json -Compress -Depth 5) } else { '(no hits for this anchor in Windows/FortiGate/MFA/SFTP/AV/email)' }
+
+    # Matched cybersecurity skill (methodology, token-bounded)
+    $skill = _Resolve-DeepSkill -ClassId ([int]$Finding.detection_class)
+    $skillText = ''
+    if (Test-Path $skill.path) {
+        $skillText = Get-Content $skill.path -Raw -Encoding utf8
+        if ($skillText.Length -gt 8000) { $skillText = $skillText.Substring(0, 8000) }
+    }
 
     $prompt = @"
-You are a senior SOC analyst investigating a CONFIRMED high-severity IIS finding.
-Base your analysis ONLY on the data below. Do NOT invent any IP, path, user, or
-event that is not present. If evidence is insufficient, say so plainly.
-Use PLAIN TEXT only - no markdown, asterisks, headers, or backticks (it renders in
-an HTML card). Be concise (<200 words). Cover: (1) what happened, (2) likely intent
-& MITRE stage, (3) blast radius / what to check next, (4) recommended containment.
+You are performing a deep, skill-driven SOC investigation of a CONFIRMED high-severity
+IIS finding. APPLY THE METHODOLOGY of the cybersecurity skill below to the evidence.
+Base everything ONLY on the provided data - do NOT invent any IP, path, user, or event.
+Plain text only (renders in a Teams card). Thorough but <350 words. Cover:
+(1) what happened, (2) cross-system correlation & timeline, (3) kill-chain stage(s) + MITRE,
+(4) scope / blast radius, (5) recommended containment and next hunt steps.
 
-FINDING:
-  technique: $($Finding.technique)
-  anchor_ip: $($Finding.anchor_ip)   anchor_user: $($Finding.anchor_user)   host: $($Finding.anchor_host)
-  summary: $($Finding.summary)
-  corroboration: $((@($Finding.corroboration_sources)) -join '; ')
+== APPLIED SKILL: $($skill.name) ==
+$skillText
 
-ANCHOR IP's RECENT IIS REQUESTS (up to 15):
-$evidence
+== FINDING ==
+technique: $($Finding.technique)
+anchor_ip: $($Finding.anchor_ip)   anchor_user: $($Finding.anchor_user)   host: $($Finding.anchor_host)
+summary: $($Finding.summary)
+correlation seen at detection: $((@($Finding.corroboration_sources)) -join '; ')
+
+== CROSS-STREAM CORRELATION EVIDENCE (OP-GL, anchor $ip, last 1h) ==
+$crossJson
+
+== ANCHOR IIS REQUESTS (last 1h, up to 15) ==
+$iisJson
 "@
-    return (_Invoke-Opus -Prompt $prompt -TimeoutSec 150)
+    $result = _Invoke-Opus -Prompt $prompt -TimeoutSec 200
+    if ($result) { return ("[skill applied: {0}]`r`n{1}" -f $skill.name, $result) }
+    return $null
 }
 
 function Invoke-OpusDailySweep {

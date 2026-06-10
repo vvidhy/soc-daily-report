@@ -55,7 +55,6 @@ function Build-AdaptiveCardEnvelope {
 
     $actions = New-Object System.Collections.Generic.List[object]
     if ($Finding.graylog_link) { $actions.Add(@{ type='Action.OpenUrl'; title='Open in Graylog'; url=[string]$Finding.graylog_link }) }
-    $actions.Add(@{ type='Action.OpenUrl'; title='Deep investigation (Cybersecurity Skills)'; url=$script:CardDeepInvestUrl })
 
     $card = [ordered]@{
         '$schema' = 'http://adaptivecards.io/schemas/adaptive-card.json'
