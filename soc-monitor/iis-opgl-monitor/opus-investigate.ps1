@@ -86,6 +86,25 @@ function _Resolve-DeepSkill {
     return @{ name = $name; path = $path }
 }
 
+function _Skill-KeySections {
+    # Token control: feed opus only the skill's PURPOSE + the top of the body
+    # (these skills front-load methodology/principles; detailed examples sit lower),
+    # not the whole SKILL.md. ~half the tokens of the full file.
+    param([string] $Path, [int] $MaxChars = 4000)
+    if (-not (Test-Path $Path)) { return '' }
+    $raw  = Get-Content $Path -Raw -Encoding utf8
+    $desc = ''
+    $body = $raw
+    if ($raw -match '(?s)^---\s*(.*?)\s*---\s*(.*)$') {
+        $fm = $matches[1]; $body = $matches[2]
+        $m = [regex]::Match($fm, '(?m)^description:\s*(.+)$')
+        if ($m.Success) { $desc = ($m.Groups[1].Value.Trim() -replace '^["'']|["'']$','') }
+    }
+    if ($body.Length -gt $MaxChars) { $body = $body.Substring(0, $MaxChars) }
+    if ($desc) { return ("Purpose: {0}`r`n`r`n{1}" -f $desc, $body) }
+    return $body
+}
+
 function _OPGL-CrossStream {
     # Correlation hunt: pull the anchor's activity across all OP-GL streams (REST).
     param([psobject] $Config, [string] $Ip, [string] $User)
@@ -140,11 +159,7 @@ function Invoke-OpusDeepDive {
 
     # Matched cybersecurity skill (methodology, token-bounded)
     $skill = _Resolve-DeepSkill -ClassId ([int]$Finding.detection_class)
-    $skillText = ''
-    if (Test-Path $skill.path) {
-        $skillText = Get-Content $skill.path -Raw -Encoding utf8
-        if ($skillText.Length -gt 8000) { $skillText = $skillText.Substring(0, 8000) }
-    }
+    $skillText = _Skill-KeySections -Path $skill.path -MaxChars 4000   # key sections only (~half the tokens)
 
     $prompt = @"
 You are performing a deep, skill-driven SOC investigation of a CONFIRMED high-severity

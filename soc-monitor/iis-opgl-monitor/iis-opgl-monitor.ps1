@@ -112,13 +112,14 @@ Write-IISLog INFO ("K: HIGH={0} CONFIRMED={1} REVIEW={2} LOGGED={3}" -f `
 try { Update-EntityRegistry -Findings $findings; Write-IISLog INFO 'K: entity registry updated' }
 catch { Write-IISLog ERROR ("K: entity registry update failed: {0}" -f $_.Exception.Message) }
 
-# Tier 2: opus deep-dive on HIGH findings only (rare, capped <=5/run, advisory).
+# Tier 2: opus deep-dive on HIGH findings only (rare, capped <=2/run, advisory).
 # Token-bounded (opus only); NEVER changes severity; if opus fails it's a no-op and
-# the alert still fires with the deterministic data.
+# the alert still fires with the deterministic data. Beyond the cap, extra HIGH
+# findings still alert (deterministic card) but skip the AI deep-dive.
 if ($high.Count -gt 0 -and (Get-Command Invoke-OpusDeepDive -ErrorAction SilentlyContinue)) {
     $ddDone = 0
     foreach ($hf in $high) {
-        if ($ddDone -ge 5) { break }
+        if ($ddDone -ge 2) { break }
         $analysis = $null
         try { $analysis = Invoke-OpusDeepDive -Finding $hf -Config $config } catch { $analysis = $null }
         if ($analysis) {
