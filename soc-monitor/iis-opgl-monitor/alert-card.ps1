@@ -46,8 +46,21 @@ function Build-AdaptiveCardEnvelope {
         $body.Add(@{ type='TextBlock'; wrap=$true; isSubtle=$true; text=('Kill chain: ' + (@($Finding.kill_chain_stages) -join ' -> ')) })
     }
     if (($Finding.PSObject.Properties['deep_analysis']) -and $Finding.deep_analysis) {
-        $body.Add(@{ type='TextBlock'; weight='Bolder'; spacing='Medium'; text='AI investigation (opus)' })
-        $body.Add(@{ type='TextBlock'; wrap=$true; text=[string]$Finding.deep_analysis })
+        # The deep-dive returns "[skill applied: <name>]\n<analysis>". Lift the skill
+        # into the heading and render the body markdown in an emphasis box so the
+        # Verdict / Do now / Investigate-further sections are easy to scan and act on.
+        $rawAnalysis = [string]$Finding.deep_analysis
+        $skillName   = ''
+        $m = [regex]::Match($rawAnalysis, '(?s)^\s*\[skill applied:\s*(.+?)\]\s*(.*)$')
+        if ($m.Success) { $skillName = $m.Groups[1].Value.Trim(); $rawAnalysis = $m.Groups[2].Value.Trim() }
+        $invHeader = if ($skillName) { "AI investigation  (skill: $skillName)" } else { 'AI investigation (opus)' }
+        $body.Add(@{
+            type='Container'; separator=$true; spacing='Medium'; style='emphasis'
+            items=@(
+                @{ type='TextBlock'; weight='Bolder'; size='Medium'; color='Accent'; wrap=$true; text=$invHeader },
+                @{ type='TextBlock'; wrap=$true; text=$rawAnalysis }
+            )
+        })
     }
     if ($Finding.investigate) {
         $body.Add(@{ type='TextBlock'; wrap=$true; isSubtle=$true; fontType='Monospace'; text=('Investigate: ' + [string]$Finding.investigate) })

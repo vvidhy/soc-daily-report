@@ -162,14 +162,46 @@ function Invoke-OpusDeepDive {
     $skillText = _Skill-KeySections -Path $skill.path -MaxChars 4000   # key sections only (~half the tokens)
 
     $prompt = @"
-You are performing a deep, skill-driven SOC investigation of a CONFIRMED high-severity
-IIS finding. APPLY THE METHODOLOGY of the cybersecurity skill below to the evidence.
-Base everything ONLY on the provided data - do NOT invent any IP, path, user, or event.
-Plain text only (renders in a Teams card). Thorough but <350 words. Cover:
-(1) what happened, (2) cross-system correlation & timeline, (3) kill-chain stage(s) + MITRE,
-(4) scope / blast radius, (5) recommended containment and next hunt steps.
+You are a SOC analyst writing a deep investigation of a CONFIRMED high-severity IIS finding
+for a Microsoft Teams card that analysts of ALL levels will read and act on. APPLY THE
+METHODOLOGY of the cybersecurity skill below. Use ONLY the provided data - never invent an
+IP, path, user, count, or event; if something is not in the data write "unknown from current data".
 
-== APPLIED SKILL: $($skill.name) ==
+WRITE FOR CLARITY so anyone can understand and act:
+- Plain language, short lines, no jargon walls.
+- Use light markdown that Teams renders: **bold** labels, "- " bullets, "1." numbered steps.
+- Do NOT use backticks, code fences, or "#" headings.
+- Keep the whole write-up under ~230 words.
+- In any query you write, use the REAL OP-GL IIS field names so it pastes and runs:
+  Client_ip, URI_Stream, URI_Query, Method, Status, Host, UserAgent, Server_Bytes, Time_Taken
+  (do NOT use IIS W3C names like cs-uri-stem, c-ip, sc-status).
+
+Use THIS EXACT structure and these bold labels:
+
+**Verdict:** one plain sentence - what this is and how serious, so anyone gets it instantly.
+
+**What happened**
+1-2 short sentences, plain English.
+
+**Correlation (other security systems)**
+- Windows: hit or none + what it means in a few words
+- FortiGate: hit or none + meaning
+- MFA / SFTP / Antivirus / Email: combine; list only what matters
+
+**Kill chain:** Stage (Txxxx) -> Stage (Txxxx)   (label any unconfirmed stage "potential")
+
+**Risk & scope**
+1-2 short lines: how far it got; what is confirmed vs unknown.
+
+**Do now**
+1. concrete containment / response action
+2. concrete action
+
+**Investigate further**
+- plain step - query: a Graylog query an analyst can paste as-is
+- plain step - query: ...
+
+== APPLIED SKILL METHODOLOGY: $($skill.name) ==
 $skillText
 
 == FINDING ==
