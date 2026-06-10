@@ -55,7 +55,13 @@ function Write-IISLog {
 # return a multi-value Object[] in WinPS 5.1; wrapping in @() forces a scalar.
 function Get-PropCount { param($Obj) if ($null -eq $Obj) { return 0 } return @($Obj.PSObject.Properties).Count }
 
-# --- dependencies (functions only; mcp__ calls happen at runtime inside them) ---
+# --- secrets first: sets $env:OPGL_BASE_URL/OPGL_API_TOKEN + webhook env ---
+if (Test-Path $secretsPath) { . $secretsPath }
+
+# --- dependencies ---
+# graylog-api.ps1 defines the mcp__OP-GL__* functions (Graylog REST wrappers) the
+# detector calls. It MUST load after secrets (reads $env:OPGL_*) and before L/C.
+. (Join-Path $here 'graylog-api.ps1')
 . (Join-Path $here 'log-validator.ps1')
 . (Join-Path $here 'entity-risk-engine.ps1')
 . (Join-Path $here 'lock-detector.ps1')

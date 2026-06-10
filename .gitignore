@@ -21,6 +21,9 @@ posted.json
 soc-monitor/iis-opgl-monitor/findings/
 **/rate-counters.json
 last-run.json
+# Entity registry holds learned internal IPs/users/hosts — runtime state, not for git
+threat-hunting-agent/baselines/iis-opgl/entity-registry.json
+suggested-rules.jsonl
 
 # OS files
 .DS_Store
