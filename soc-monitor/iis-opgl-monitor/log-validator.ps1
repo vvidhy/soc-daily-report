@@ -12,10 +12,12 @@
 # ---------------------------------------------------------------------------
 # Private helper: extract a log-count integer from an aggregate_logs result.
 #
-# Handles three shapes aggregate_logs may return:
-#   1. PSCustomObject with a 'total' property  -> use .total
-#   2. PSCustomObject with a 'count' property  -> use .count
-#   3. Raw scalar (int/long/double)            -> cast directly
+# Handles the shapes aggregate_logs may return:
+#   1. PSCustomObject with 'total_matched'     -> use .total_matched (LIVE shape:
+#      the OP-GL aggregate_logs tool returns total_matched as the full match count)
+#   2. PSCustomObject with a 'total' property  -> use .total
+#   3. PSCustomObject with a 'count' property  -> use .count
+#   4. Raw scalar (int/long/double)            -> cast directly
 #
 # NOTE: We deliberately do NOT use PSObject.Properties['count'] because
 # PowerShell's property-name lookup is case-insensitive and an Object[] array
@@ -33,8 +35,14 @@ function script:Get-AggregateCount {
         return [long]$RawResult
     }
 
-    # PSCustomObject with a top-level 'total' field (standard Graylog shape)
     if ($RawResult -is [System.Management.Automation.PSCustomObject]) {
+        # LIVE OP-GL shape: aggregate_logs returns total_matched as the full count
+        # (the 'top' map only holds the first `size` buckets; never sum it for a total).
+        if ($null -ne $RawResult.PSObject.Properties['total_matched'] -and
+            $null -ne $RawResult.total_matched) {
+            try { return [long]$RawResult.total_matched } catch { return [long]0 }
+        }
+        # Standard Graylog shape
         if ($null -ne $RawResult.PSObject.Properties['total']  -and
             $null -ne $RawResult.total) {
             try { return [long]$RawResult.total  } catch { return [long]0 }
@@ -113,13 +121,19 @@ function Invoke-LogValidation {
     Write-Verbose ("[log-validator] total_iis_logs={0}" -f $total_iis_logs)
 
     # ------------------------------------------------------------------
-    # Step 3 — Parsed/structured IIS log count (Status + Client_ip exist)
+    # Step 3 — Parsed/structured IIS log count.
+    # The true parse-integrity signal is _exists_:Status (extracted on 100% of
+    # correctly-ingested IIS logs). We deliberately do NOT require _exists_:Client_ip:
+    # ~11% of IIS logs legitimately have no X-Forwarded-For (direct/internal requests,
+    # health checks) so requiring Client_ip would mis-count them as "unparsed" and
+    # fire a false IIS_FILTER_DRIFT every run. Status:[100 TO 599] excludes only
+    # sc-status=0 aborted connections (~0.06%).
     # ------------------------------------------------------------------
     Write-Verbose "[log-validator] Querying parsed IIS log count (prod stream)..."
     $parsedRaw = $null
     try {
         $parsedRaw = mcp__OP-GL__aggregate_logs `
-            -query "filebeat_log_file_path:*inetpub* AND _exists_:Status AND _exists_:Client_ip AND Status:[100 TO 599]" `
+            -query "filebeat_log_file_path:*inetpub* AND _exists_:Status AND Status:[100 TO 599]" `
             -field "filebeat_log_file_path" `
             -rangeSeconds $rangeSeconds `
             -streamId $Config.iis_streams.prod

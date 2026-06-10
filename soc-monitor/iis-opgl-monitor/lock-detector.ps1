@@ -99,6 +99,17 @@ function _Apply-AllowList {
 function _Safe-Results {
     param($McpResult)
     if ($null -eq $McpResult) { return @() }
+    # LIVE search_logs_relative shape: { total_results, query, time_range, messages:[...] }
+    if ($McpResult -is [System.Management.Automation.PSCustomObject]) {
+        if (($McpResult.PSObject.Properties.Name -contains 'messages') -and $null -ne $McpResult.messages) {
+            return @($McpResult.messages)
+        }
+        if (($McpResult.PSObject.Properties.Name -contains 'results') -and $null -ne $McpResult.results) {
+            return @($McpResult.results)
+        }
+        return @()
+    }
+    # Already an array/collection of rows
     if ($McpResult -is [System.Collections.IEnumerable] -and $McpResult -isnot [string]) {
         return @($McpResult)
     }
@@ -107,52 +118,58 @@ function _Safe-Results {
 
 function _Safe-AggCount {
     param($McpResult)
-    if ($null -eq $McpResult) { return 0 }
-    # aggregate_logs returns an object with a count or total field
-    if ($McpResult.PSObject.Properties.Name -contains 'count') { return [int]$McpResult.count }
-    if ($McpResult.PSObject.Properties.Name -contains 'total') { return [int]$McpResult.total }
-    if ($McpResult -is [int] -or $McpResult -is [long]) { return [int]$McpResult }
-    return 0
+    if ($null -eq $McpResult) { return [long]0 }
+    if ($McpResult -is [int] -or $McpResult -is [long]) { return [long]$McpResult }
+    if ($McpResult -is [System.Management.Automation.PSCustomObject]) {
+        # LIVE aggregate_logs shape: total_matched is the full match count.
+        # (The 'top' map only holds the first `size` buckets — never sum it.)
+        if ($McpResult.PSObject.Properties.Name -contains 'total_matched') { return [long]$McpResult.total_matched }
+        if ($McpResult.PSObject.Properties.Name -contains 'total')         { return [long]$McpResult.total }
+        if ($McpResult.PSObject.Properties.Name -contains 'count')         { return [long]$McpResult.count }
+    }
+    return [long]0
 }
 
 function _Is-EntityNew {
     param([string]$Type, [string]$Value, [PSCustomObject]$Registry)
     if (-not $Value -or $Value -eq "-") { return $false }
-    # Prefer registered function when available
-    if (Get-Command Register-IISEntity -ErrorAction SilentlyContinue) {
-        $result = Register-IISEntity -Type $Type -Value $Value
-        return ($result -and $result.is_new -eq $true)
-    }
-    # Fallback: check registry object directly
+    if (-not $Registry) { return $true }
+    # Read-only registry check. Registration (writes) happens in K-phase via
+    # Update-EntityRegistry; calling Register-IISEntity here would mutate the
+    # registry mid-scan AND use the wrong parameter name (-Id, not -Value).
+    # Use the property indexer (returns $null when absent) rather than
+    # .Properties.Name -contains, which throws on an empty bucket under StrictMode.
+    $bucket = $null
     switch ($Type) {
-        "ip"   { return -not ($Registry.ips.PSObject.Properties.Name -contains $Value) }
-        "uri"  { return -not ($Registry.uris.PSObject.Properties.Name -contains $Value) }
-        "user" { return -not ($Registry.users.PSObject.Properties.Name -contains $Value) }
-        "host" { return -not ($Registry.hosts.PSObject.Properties.Name -contains $Value) }
-        # UserAgent: registry does not have a dedicated uas bucket; treat every UA as new
-        # so Class 10 scanner detection is conservative (never silently suppresses).
+        "ip"   { $bucket = $Registry.ips }
+        "uri"  { $bucket = $Registry.uris }
+        "user" { $bucket = $Registry.users }
+        "host" { $bucket = $Registry.hosts }
+        # UserAgent: registry has no dedicated bucket; treat every UA as new so
+        # Class 10 scanner detection stays conservative (never silently suppresses).
         "ua"   { return $true }
+        default { return $false }
     }
-    return $false
+    if (-not $bucket) { return $true }
+    return ($null -eq $bucket.PSObject.Properties[$Value])
 }
 
 function _Check-Rate {
-    param([string]$Type, [int]$Count, [int]$WindowMinutes, [PSCustomObject]$Config)
-    if (Get-Command Test-RateThreshold -ErrorAction SilentlyContinue) {
-        return Test-RateThreshold -Type $Type -Count $Count -WindowMinutes $WindowMinutes -Config $Config
-    }
-    # Fallback thresholds
+    param([string]$Type, [long]$Count, [int]$WindowMinutes, [PSCustomObject]$Config)
+    # Direct config-threshold comparison. Avoids Test-RateThreshold's mandatory
+    # -EntityId param and its PSCustomObject return value (which is always truthy);
+    # the comparison logic here is identical to that function's.
     switch ($Type) {
-        "401"         { return $Count -gt $Config.all_thresholds.auth_401_per_15min }
-        "404"         { return $Count -gt $Config.all_thresholds.enum_404_per_1hr }
-        "bytes"       { return $Count -gt $Config.all_thresholds.exfil_bytes_per_hr }
-        "beacon_pairs"{ return $Count -ge $Config.all_thresholds.beacon_same_pair_windows }
+        "401"          { return $Count -gt [long]$Config.all_thresholds.auth_401_per_15min }
+        "404"          { return $Count -gt [long]$Config.all_thresholds.enum_404_per_1hr }
+        "bytes"        { return $Count -gt [long]$Config.all_thresholds.exfil_bytes_per_hr }
+        "beacon_pairs" { return $Count -ge [long]$Config.all_thresholds.beacon_same_pair_windows }
     }
     return $false
 }
 
 # IIS search fields reused across all classes
-$script:IIS_FIELDS = "Method,Status,Client_ip,URI_Stream,URI_Query,Host,Time_Taken,UserAgent,bytes_sent"
+$script:IIS_FIELDS = "Method,Status,Client_ip,URI_Stream,URI_Query,Host,Time_Taken,UserAgent,Server_Bytes"
 
 # ---------------------------------------------------------------------------
 # FUNCTION 1: Invoke-LockScan
@@ -842,7 +859,7 @@ function Invoke-LockScan {
         $c13BytesByIp = @{}
         foreach ($row in $c13Rows) {
             $ip    = if ($row.Client_ip)   { $row.Client_ip }   else { "-" }
-            $bytes = if ($row.bytes_sent)  { [long]$row.bytes_sent } else { 0 }
+            $bytes = if ($row.Server_Bytes) { try { [long]$row.Server_Bytes } catch { 0 } } else { 0 }
             if (-not $c13BytesByIp.ContainsKey($ip)) {
                 $c13BytesByIp[$ip] = @{ total_bytes = 0L; host = "-"; ts = [datetime]::UtcNow.ToString('o') }
             }
@@ -873,7 +890,7 @@ function Invoke-LockScan {
         if ($c13Rows.Count -eq 0) {
             $findings.Add((_New-Finding -ClassId 13 -Severity "LOGGED" -Title "Class 13 -- Exfil: No bytes data in drill rows" `
                 -Technique "T1030 -- Data Transfer Size Limits" `
-                -Summary "$c13Count IIS requests in window. No bytes_sent data available for analysis." `
+                -Summary "$c13Count IIS requests in window. No Server_Bytes data available for analysis." `
                 -RawQuery $c13Query))
         }
     }
