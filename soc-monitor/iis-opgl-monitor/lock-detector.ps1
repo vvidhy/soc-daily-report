@@ -24,9 +24,13 @@ function _New-FindingId {
 }
 
 function _New-GraylogLink {
-    param([string]$Query, [string]$StreamId)
+    # Deep-link into Graylog search that pre-fills BOTH the query and a time range
+    # wide enough that the event is still in view when the alert is actioned later
+    # (default 24h relative). Without rangetype/relative Graylog opens at its default
+    # window and the result looks empty even though the query is set.
+    param([string]$Query, [string]$StreamId, [int]$RelativeSeconds = 86400)
     $enc = [Uri]::EscapeDataString($Query)
-    return "https://siem.secureocp.com/search?q=$enc&streams=$StreamId"
+    return "https://siem.secureocp.com/search?q=$enc&rangetype=relative&relative=$RelativeSeconds&streams=$StreamId"
 }
 
 function _New-Finding {
