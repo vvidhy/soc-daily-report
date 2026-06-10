@@ -1,9 +1,9 @@
-<?xml version="1.0" encoding="UTF-8"?>
+<?xml version="1.0"?>
 <Task version="1.2" xmlns="urn:schemas-microsoft-com:task:1.2">
   <RegistrationInfo>
     <Date>2026-06-10T00:00:00</Date>
     <Author>SOC</Author>
-    <Description>IIS OP-GL log monitoring every 30 minutes (60-min lookback for boundary-overlap, deduped) — behavioral detection plus cross-source correlation</Description>
+    <Description>IIS OP-GL log monitoring every 30 minutes (60-min lookback for boundary-overlap, deduped) - behavioral detection plus cross-source correlation</Description>
     <URI>\SOC-IIS-OPGL-Monitor</URI>
   </RegistrationInfo>
   <Triggers>
