@@ -10,7 +10,7 @@
 # All MCP calls: mcp__OP-GL__* tools via Claude tool protocol
 # Aggregate-first pattern: always aggregate before drill; skip drill if count=0
 
-Set-StrictMode -Version Latest
+# StrictMode intentionally NOT enabled: the 17-class code relies on lenient PowerShell
 $ErrorActionPreference = 'Stop'
 
 # ---------------------------------------------------------------------------
@@ -98,22 +98,26 @@ function _Apply-AllowList {
 
 function _Safe-Results {
     param($McpResult)
-    if ($null -eq $McpResult) { return @() }
+    # NOTE: every return uses the unary comma (,@(...)) to defeat PowerShell's
+    # single-element-array unwrapping on function return. Without it a 1-row
+    # result comes back as a bare PSCustomObject, and callers' `.Count` checks
+    # (e.g. correlation pivots, drill row counts) silently misbehave on scalars.
+    if ($null -eq $McpResult) { return ,@() }
     # LIVE search_logs_relative shape: { total_results, query, time_range, messages:[...] }
     if ($McpResult -is [System.Management.Automation.PSCustomObject]) {
         if (($McpResult.PSObject.Properties.Name -contains 'messages') -and $null -ne $McpResult.messages) {
-            return @($McpResult.messages)
+            return ,@($McpResult.messages)
         }
         if (($McpResult.PSObject.Properties.Name -contains 'results') -and $null -ne $McpResult.results) {
-            return @($McpResult.results)
+            return ,@($McpResult.results)
         }
-        return @()
+        return ,@()
     }
     # Already an array/collection of rows
     if ($McpResult -is [System.Collections.IEnumerable] -and $McpResult -isnot [string]) {
-        return @($McpResult)
+        return ,@($McpResult)
     }
-    return @()
+    return ,@()
 }
 
 function _Safe-AggCount {
@@ -218,7 +222,7 @@ function Invoke-LockScan {
         foreach ($row in $c1Rows) {
             $ip      = if ($row.Client_ip)   { $row.Client_ip }   else { "-" }
             $uri     = if ($row.URI_Stream)  { $row.URI_Stream }  else { "-" }
-            $host    = if ($row.Host)        { $row.Host }        else { "-" }
+            $iisHost    = if ($row.Host)        { $row.Host }        else { "-" }
             $ts      = if ($row.timestamp)   { $row.timestamp }   else { [datetime]::UtcNow.ToString('o') }
             $ipNew   = _Is-EntityNew -Type "ip"  -Value $ip  -Registry $Registry
             $uriNew  = _Is-EntityNew -Type "uri" -Value $uri -Registry $Registry
@@ -227,7 +231,7 @@ function Invoke-LockScan {
                 -Title "Class 01 -- SQLi: HTTP 500 from $ip on $uri" `
                 -Technique "T1190 -- Exploitation of Public-Facing Application" `
                 -Summary "IP $ip generated HTTP 500 on URI $uri. IP is_new=$ipNew, URI is_new=$uriNew. $c1Count total 500s in window. $($c1Query)" `
-                -AnchorIp $ip -AnchorHost $host -AnchorTime $ts `
+                -AnchorIp $ip -AnchorHost $iisHost -AnchorTime $ts `
                 -EntityIsNew ($ipNew -or $uriNew) `
                 -RawQuery $c1Query `
                 -Investigate "Client_ip:$ip AND Status:500 AND filebeat_log_file_path:*inetpub*" `
@@ -266,7 +270,7 @@ function Invoke-LockScan {
         foreach ($row in $c2Rows) {
             $ip     = if ($row.Client_ip)  { $row.Client_ip }  else { "-" }
             $uri    = if ($row.URI_Stream) { $row.URI_Stream } else { "-" }
-            $host   = if ($row.Host)       { $row.Host }       else { "-" }
+            $iisHost   = if ($row.Host)       { $row.Host }       else { "-" }
             $ts     = if ($row.timestamp)  { $row.timestamp }  else { [datetime]::UtcNow.ToString('o') }
             $query  = if ($row.URI_Query)  { $row.URI_Query }  else { "" }
             $ipNew  = _Is-EntityNew -Type "ip"  -Value $ip  -Registry $Registry
@@ -277,7 +281,7 @@ function Invoke-LockScan {
                 -Title "Class 02 -- XSS: POST from $ip (query_len=$($query.Length))" `
                 -Technique "T1059.007 -- Command and Scripting Interpreter: JavaScript" `
                 -Summary "IP $ip POSTed to $uri. IP is_new=$ipNew, URI is_new=$uriNew, query_length=$($query.Length) (threshold 200). $c2Count total POSTs in window." `
-                -AnchorIp $ip -AnchorHost $host -AnchorTime $ts `
+                -AnchorIp $ip -AnchorHost $iisHost -AnchorTime $ts `
                 -EntityIsNew ($ipNew -or $uriNew) `
                 -RawQuery $c2Query `
                 -Investigate "Client_ip:$ip AND Method:POST AND filebeat_log_file_path:*inetpub*" `
@@ -308,7 +312,7 @@ function Invoke-LockScan {
         foreach ($row in $c3Rows) {
             $ip      = if ($row.Client_ip)   { $row.Client_ip }   else { "-" }
             $uri     = if ($row.URI_Stream)  { $row.URI_Stream }  else { "-" }
-            $host    = if ($row.Host)        { $row.Host }        else { "-" }
+            $iisHost    = if ($row.Host)        { $row.Host }        else { "-" }
             $ts      = if ($row.timestamp)   { $row.timestamp }   else { [datetime]::UtcNow.ToString('o') }
             $timeTkn = if ($row.Time_Taken)  { [int]$row.Time_Taken } else { 0 }
             $ipNew   = _Is-EntityNew -Type "ip"  -Value $ip  -Registry $Registry
@@ -318,7 +322,7 @@ function Invoke-LockScan {
                 -Title "Class 03 -- RCE: High-latency 200 from $ip (${timeTkn}ms)" `
                 -Technique "T1059 -- Command and Scripting Interpreter" `
                 -Summary "IP $ip received HTTP 200 on $uri with Time_Taken=${timeTkn}ms. IP is_new=$ipNew, URI is_new=$uriNew. $c3Count total high-latency 200s in window." `
-                -AnchorIp $ip -AnchorHost $host -AnchorTime $ts `
+                -AnchorIp $ip -AnchorHost $iisHost -AnchorTime $ts `
                 -EntityIsNew ($ipNew -or $uriNew) `
                 -RawQuery $c3Query `
                 -Investigate "Client_ip:$ip AND Status:200 AND Time_Taken:>5000 AND filebeat_log_file_path:*inetpub*" `
@@ -349,14 +353,14 @@ function Invoke-LockScan {
         foreach ($row in $c4Rows) {
             $ip   = if ($row.Client_ip)  { $row.Client_ip }  else { "-" }
             $uri  = if ($row.URI_Stream) { $row.URI_Stream } else { "-" }
-            $host = if ($row.Host)       { $row.Host }       else { "-" }
+            $iisHost = if ($row.Host)       { $row.Host }       else { "-" }
             $ts   = if ($row.timestamp)  { $row.timestamp }  else { [datetime]::UtcNow.ToString('o') }
             # Always REVIEW for traversal sequences -- no benign exception for ".." in URI
             $f = _New-Finding -ClassId 4 -Severity "REVIEW" `
                 -Title "Class 04 -- Path Traversal: '..' in URI from $ip" `
                 -Technique "T1083 -- File and Directory Discovery" `
                 -Summary "Path traversal sequence '..' detected in URI '$uri' from IP $ip. $c4Count total traversal requests in window. All traversal patterns force REVIEW." `
-                -AnchorIp $ip -AnchorHost $host -AnchorTime $ts `
+                -AnchorIp $ip -AnchorHost $iisHost -AnchorTime $ts `
                 -EntityIsNew ($true) `
                 -RawQuery $c4Query `
                 -Investigate "Client_ip:$ip AND URI_Stream:*..*" `
@@ -395,7 +399,7 @@ function Invoke-LockScan {
         foreach ($row in $c5Rows) {
             $ip    = if ($row.Client_ip)  { $row.Client_ip }  else { "-" }
             $uri   = if ($row.URI_Stream) { $row.URI_Stream } else { "-" }
-            $host  = if ($row.Host)       { $row.Host }       else { "-" }
+            $iisHost  = if ($row.Host)       { $row.Host }       else { "-" }
             $ts    = if ($row.timestamp)  { $row.timestamp }  else { [datetime]::UtcNow.ToString('o') }
             $query = if ($row.URI_Query)  { $row.URI_Query }  else { "" }
             # Always REVIEW -- SSRF patterns are never benign
@@ -403,7 +407,7 @@ function Invoke-LockScan {
                 -Title "Class 05 -- SSRF: Internal IP/localhost in query from $ip" `
                 -Technique "T1552.005 -- Unsecured Credentials: Cloud Instance Metadata API" `
                 -Summary "SSRF probe detected: IP $ip queried $uri with internal-targeting query string. Query: '$query'. $c5Count total SSRF patterns in window." `
-                -AnchorIp $ip -AnchorHost $host -AnchorTime $ts `
+                -AnchorIp $ip -AnchorHost $iisHost -AnchorTime $ts `
                 -EntityIsNew $true `
                 -RawQuery $c5Query `
                 -Investigate "Client_ip:$ip AND (URI_Query:*169.254* OR URI_Query:*127.0.0* OR URI_Query:*localhost*)" `
@@ -443,7 +447,7 @@ function Invoke-LockScan {
         foreach ($row in $c6Rows) {
             $ip    = if ($row.Client_ip)  { $row.Client_ip }  else { "-" }
             $uri   = if ($row.URI_Stream) { $row.URI_Stream } else { "-" }
-            $host  = if ($row.Host)       { $row.Host }       else { "-" }
+            $iisHost  = if ($row.Host)       { $row.Host }       else { "-" }
             $ts    = if ($row.timestamp)  { $row.timestamp }  else { [datetime]::UtcNow.ToString('o') }
             $query = if ($row.URI_Query)  { $row.URI_Query }  else { "" }
             if ($query.Length -le 300) { continue }
@@ -454,7 +458,7 @@ function Invoke-LockScan {
                 -Title "Class 06 -- Exploit Payload: Oversized query (len=$($query.Length)) from $ip" `
                 -Technique "T1203 -- Exploitation for Client Execution" `
                 -Summary "IP $ip sent query string of length $($query.Length) chars (threshold 300) to $uri. IP is_new=$ipNew. Possible Log4Shell JNDI, SSTI template, or XXE payload." `
-                -AnchorIp $ip -AnchorHost $host -AnchorTime $ts `
+                -AnchorIp $ip -AnchorHost $iisHost -AnchorTime $ts `
                 -EntityIsNew $ipNew `
                 -RawQuery $c6Query `
                 -Investigate "Client_ip:$ip AND URI_Stream:$uri" `
@@ -493,7 +497,7 @@ function Invoke-LockScan {
         foreach ($row in $c7aRows) {
             $ip     = if ($row.Client_ip)  { $row.Client_ip }  else { "-" }
             $uri    = if ($row.URI_Stream) { $row.URI_Stream } else { "-" }
-            $host   = if ($row.Host)       { $row.Host }       else { "-" }
+            $iisHost   = if ($row.Host)       { $row.Host }       else { "-" }
             $ts     = if ($row.timestamp)  { $row.timestamp }  else { [datetime]::UtcNow.ToString('o') }
             $uriNew = _Is-EntityNew -Type "uri" -Value $uri -Registry $Registry
             $sev    = if ($uriNew) { "REVIEW" } else { "LOGGED" }
@@ -501,7 +505,7 @@ function Invoke-LockScan {
                 -Title "Class 07a -- Webshell: POST->200 from $ip on $uri (uri_new=$uriNew)" `
                 -Technique "T1505.003 -- Server Software Component: Web Shell" `
                 -Summary "IP $ip received HTTP 200 on POST to $uri. URI is_new=$uriNew. $c7aCount total POST->200 in window. New URI POST->200 suggests webshell upload/execution." `
-                -AnchorIp $ip -AnchorHost $host -AnchorTime $ts `
+                -AnchorIp $ip -AnchorHost $iisHost -AnchorTime $ts `
                 -EntityIsNew $uriNew `
                 -RawQuery $c7aQuery `
                 -Investigate "Client_ip:$ip AND Method:POST AND Status:200 AND URI_Stream:$uri" `
@@ -529,14 +533,14 @@ function Invoke-LockScan {
         foreach ($row in $c7bRows) {
             $ip   = if ($row.Client_ip)  { $row.Client_ip }  else { "-" }
             $uri  = if ($row.URI_Stream) { $row.URI_Stream } else { "-" }
-            $host = if ($row.Host)       { $row.Host }       else { "-" }
+            $iisHost = if ($row.Host)       { $row.Host }       else { "-" }
             $ts   = if ($row.timestamp)  { $row.timestamp }  else { [datetime]::UtcNow.ToString('o') }
             # Always REVIEW -- static extensions accepting POST are always suspicious
             $f = _New-Finding -ClassId 7 -Severity "REVIEW" `
                 -Title "Class 07b -- Webshell: POST->200 to static ext $uri from $ip" `
                 -Technique "T1505.003 -- Server Software Component: Web Shell" `
                 -Summary "POST->200 on static file extension URI '$uri' from IP $ip. Static assets should never accept POST. $c7bCount total static-ext POST->200 in window. Always REVIEW." `
-                -AnchorIp $ip -AnchorHost $host -AnchorTime $ts `
+                -AnchorIp $ip -AnchorHost $iisHost -AnchorTime $ts `
                 -EntityIsNew $true `
                 -RawQuery $c7bQuery `
                 -Investigate "Client_ip:$ip AND Method:POST AND Status:200 AND URI_Stream:$uri" `
@@ -583,11 +587,11 @@ function Invoke-LockScan {
         foreach ($ip in $c8ByIp.Keys) {
             $perIpCount = $c8ByIp[$ip]
             $rateEx     = _Check-Rate -Type "401" -Count $perIpCount -WindowMinutes 15 -Config $Config
-            $host       = "-"
+            $iisHost       = "-"
             $ts         = [datetime]::UtcNow.ToString('o')
             foreach ($row in $c8Rows) {
                 if ($row.Client_ip -eq $ip) {
-                    if ($row.Host)      { $host = $row.Host }
+                    if ($row.Host)      { $iisHost = $row.Host }
                     if ($row.timestamp) { $ts   = $row.timestamp }
                     break
                 }
@@ -597,7 +601,7 @@ function Invoke-LockScan {
                 -Title "Class 08 -- 401-Storm: $perIpCount 401s from $ip in 15 min" `
                 -Technique "T1110 -- Brute Force" `
                 -Summary "IP $ip generated $perIpCount HTTP 401 responses in 15 minutes. Rate threshold exceeded=$rateEx. $c8Count total 401s across all IPs. Check for 200-after-401 pattern." `
-                -AnchorIp $ip -AnchorHost $host -AnchorTime $ts `
+                -AnchorIp $ip -AnchorHost $iisHost -AnchorTime $ts `
                 -RateExceeded $rateEx `
                 -RawQuery $c8Query `
                 -Investigate "Client_ip:$ip AND (Status:401 OR Status:200) AND filebeat_log_file_path:*inetpub*" `
@@ -643,11 +647,11 @@ function Invoke-LockScan {
         foreach ($ip in $c9ByIp.Keys) {
             $uniqueUris = $c9ByIp[$ip].Count
             $rateEx     = _Check-Rate -Type "404" -Count $uniqueUris -WindowMinutes 60 -Config $Config
-            $host       = "-"
+            $iisHost       = "-"
             $ts         = [datetime]::UtcNow.ToString('o')
             foreach ($row in $c9Rows) {
                 if ($row.Client_ip -eq $ip) {
-                    if ($row.Host)      { $host = $row.Host }
+                    if ($row.Host)      { $iisHost = $row.Host }
                     if ($row.timestamp) { $ts   = $row.timestamp }
                     break
                 }
@@ -657,7 +661,7 @@ function Invoke-LockScan {
                 -Title "Class 09 -- 404 Sweep: $uniqueUris unique 404 URIs from $ip" `
                 -Technique "T1595 -- Active Scanning" `
                 -Summary "IP $ip hit $uniqueUris unique 404 URIs in 1 hour. Rate threshold exceeded=$rateEx. $c9Count total 404s. High unique-URI breadth suggests systematic endpoint enumeration." `
-                -AnchorIp $ip -AnchorHost $host -AnchorTime $ts `
+                -AnchorIp $ip -AnchorHost $iisHost -AnchorTime $ts `
                 -RateExceeded $rateEx `
                 -RawQuery $c9Query `
                 -Investigate "Client_ip:$ip AND Status:404 AND filebeat_log_file_path:*inetpub*" `
@@ -752,7 +756,7 @@ function Invoke-LockScan {
             $ip     = if ($row.Client_ip)  { $row.Client_ip }  else { "-" }
             $uri    = if ($row.URI_Stream) { $row.URI_Stream } else { "-" }
             $status = if ($row.Status)     { [int]$row.Status } else { 0 }
-            $host   = if ($row.Host)       { $row.Host }       else { "-" }
+            $iisHost   = if ($row.Host)       { $row.Host }       else { "-" }
             $ts     = if ($row.timestamp)  { $row.timestamp }  else { [datetime]::UtcNow.ToString('o') }
             $ipNew  = _Is-EntityNew -Type "ip" -Value $ip -Registry $Registry
             # 200 on these paths = always REVIEW regardless of entity
@@ -761,7 +765,7 @@ function Invoke-LockScan {
                 -Title "Class 11 -- CVE/CMS Probe: $ip accessed $uri (status=$status)" `
                 -Technique "T1190 -- Exploitation of Public-Facing Application" `
                 -Summary "IP $ip accessed sensitive path '$uri' returning HTTP $status. IP is_new=$ipNew. Status=200 on CMS/CVE path forces REVIEW regardless of IP. $c11Count total probe hits in window." `
-                -AnchorIp $ip -AnchorHost $host -AnchorTime $ts `
+                -AnchorIp $ip -AnchorHost $iisHost -AnchorTime $ts `
                 -EntityIsNew $ipNew `
                 -RawQuery $c11Query `
                 -Investigate "Client_ip:$ip AND URI_Stream:$uri" `
@@ -991,13 +995,13 @@ function Invoke-LockScan {
             $ipNew = _Is-EntityNew -Type "ip" -Value $ip -Registry $Registry
             if ($ipNew -and -not $c15NewIps.Contains($ip)) {
                 [void]$c15NewIps.Add($ip)
-                $host = if ($row.Host)      { $row.Host }      else { "-" }
+                $iisHost = if ($row.Host)      { $row.Host }      else { "-" }
                 $ts   = if ($row.timestamp) { $row.timestamp } else { [datetime]::UtcNow.ToString('o') }
                 $f = _New-Finding -ClassId 15 -Severity "REVIEW" `
                     -Title "Class 15 -- First-Occurrence: New IP $ip in window" `
                     -Technique "T1078 -- Valid Accounts" `
                     -Summary "IP $ip seen for first time in IIS logs (not in entity registry). Active in current $WindowHours-hour window. Warrants review if not a known new client or partner." `
-                    -AnchorIp $ip -AnchorHost $host -AnchorTime $ts `
+                    -AnchorIp $ip -AnchorHost $iisHost -AnchorTime $ts `
                     -EntityIsNew $true `
                     -RawQuery $c15Query `
                     -Investigate "Client_ip:$ip AND filebeat_log_file_path:*inetpub*" `
@@ -1037,7 +1041,7 @@ function Invoke-LockScan {
             $ip     = if ($row.Client_ip)  { $row.Client_ip }  else { "-" }
             $method = if ($row.Method)     { $row.Method }     else { "-" }
             $query  = if ($row.URI_Query)  { $row.URI_Query }  else { "" }
-            $host   = if ($row.Host)       { $row.Host }       else { "-" }
+            $iisHost   = if ($row.Host)       { $row.Host }       else { "-" }
             $ts     = if ($row.timestamp)  { $row.timestamp }  else { [datetime]::UtcNow.ToString('o') }
             # Check extreme query string length (>500 chars) -- always REVIEW
             if ($query.Length -gt 500) {
@@ -1045,7 +1049,7 @@ function Invoke-LockScan {
                     -Title "Class 16 -- Structural: Extreme query string (len=$($query.Length)) from $ip" `
                     -Technique "T1027 -- Obfuscated Files or Information" `
                     -Summary "IP $ip sent a query string of $($query.Length) chars (threshold 500) on URI $($row.URI_Stream). Extreme length may contain encoded obfuscated payloads." `
-                    -AnchorIp $ip -AnchorHost $host -AnchorTime $ts `
+                    -AnchorIp $ip -AnchorHost $iisHost -AnchorTime $ts `
                     -EntityIsNew $true `
                     -RawQuery $c16Query `
                     -Investigate "Client_ip:$ip AND filebeat_log_file_path:*inetpub*" `
@@ -1062,7 +1066,7 @@ function Invoke-LockScan {
                 }
             }
             [void]$c16MethodsByIp[$ip].methods.Add($method)
-            if ($host -ne "-" -and $c16MethodsByIp[$ip].host -eq "-") { $c16MethodsByIp[$ip].host = $host }
+            if ($iisHost -ne "-" -and $c16MethodsByIp[$ip].host -eq "-") { $c16MethodsByIp[$ip].host = $iisHost }
             if ($ts -ne [datetime]::UtcNow.ToString('o') -and $c16MethodsByIp[$ip].ts -eq [datetime]::UtcNow.ToString('o')) { $c16MethodsByIp[$ip].ts = $ts }
         }
         foreach ($ip in $c16MethodsByIp.Keys) {
@@ -1346,74 +1350,35 @@ function Resolve-KillChain {
     $scriptFile = if ($PSCommandPath) { $PSCommandPath } `
                   elseif ($MyInvocation.ScriptName) { $MyInvocation.ScriptName } `
                   else { $null }
-    $rulesPath  = $null
-    if ($scriptFile) {
-        $moduleRoot = Split-Path -Parent (Split-Path -Parent $scriptFile)
-        $candidate  = Join-Path $moduleRoot "threat-hunting-agent\detection_rules\lock\iis-lock-rules.json"
-        if (Test-Path $candidate) { $rulesPath = $candidate }
-    }
-    # Final fallback: search by known relative convention from the working directory
-    if (-not $rulesPath) {
-        $candidates = @(
-            "D:\Vidhya\threat-hunting-agent\detection_rules\lock\iis-lock-rules.json",
-            (Join-Path (Get-Location) "threat-hunting-agent\detection_rules\lock\iis-lock-rules.json")
-        )
-        foreach ($c in $candidates) {
-            if (Test-Path $c) { $rulesPath = $c; break }
-        }
-    }
-
     $class17Elevated = @($Findings | Where-Object {
         $_.detection_class -eq 17 -and $_.severity -in @("REVIEW","CONFIRMED","HIGH")
     })
 
-    if ($class17Elevated.Count -gt 0 -and $rulesPath -and (Test-Path $rulesPath)) {
+    if ($class17Elevated.Count -gt 0) {
+        # ADVISORY ONLY -- do NOT mutate the committed iis-lock-rules.json at runtime.
+        # Auto-graduating on every run caused runaway growth (a new class each hour)
+        # and dirtied the tracked file. Per design a pattern should graduate only after
+        # recurring >=3 times across runs; until that is tracked, append each AI-surfaced
+        # pattern to a gitignored side-file for analyst review and manual promotion.
         try {
-            $rulesRaw  = Get-Content $rulesPath -Raw -Encoding utf8
-            # ConvertFrom-Json -Depth is PS 7+ only; use plain ConvertFrom-Json on PS 5.1
-            $rulesObj  = $rulesRaw | ConvertFrom-Json
-            $maxId     = ($rulesObj.classes | Measure-Object -Property id -Maximum).Maximum
-
+            $suggestRoot = if ($scriptFile) { Split-Path -Parent $scriptFile } else { (Get-Location).Path }
+            $suggestDir  = Join-Path $suggestRoot "logs"
+            if (-not (Test-Path $suggestDir)) { $null = New-Item -ItemType Directory -Force -Path $suggestDir }
+            $suggestFile = Join-Path $suggestDir "suggested-rules.jsonl"
             foreach ($c17f in $class17Elevated) {
-                # Extract pattern hint from summary
-                $patternDesc = if ($c17f.summary.Length -gt 120) {
-                    $c17f.summary.Substring(0, 120)
-                } else {
-                    $c17f.summary
+                $suggestion = [ordered]@{
+                    suggested_at = [datetime]::UtcNow.ToString('o')
+                    source       = "Class17-AIOpenHunt"
+                    title        = $c17f.title
+                    summary      = $c17f.summary
+                    anchor_ip    = $c17f.anchor_ip
                 }
-
-                # Check if a very similar class already exists (simple substring match on name)
-                $alreadyExists = $rulesObj.classes | Where-Object {
-                    $_.name -like "*AI-Discovered*" -and $c17f.summary -and $_.ai_prompt_hint -like "*$($patternDesc.Substring(0, [Math]::Min(30, $patternDesc.Length)))*"
-                }
-                if ($alreadyExists) { continue }
-
-                $maxId++
-                $newClass = [PSCustomObject]@{
-                    id                  = $maxId
-                    name                = "AI-Discovered: $($c17f.title -replace 'Class 17 -- AI Open Hunt: ', '' -replace ' rows for analyst review', '')"
-                    mitre_id            = "T1059"
-                    default_severity    = "REVIEW"
-                    retrieval_strategy  = "AI-discovered pattern from open hunt. Review summary: $patternDesc"
-                    ueba_dimensions     = @("anchor_ip", "URI_Stream")
-                    ai_prompt_hint      = $c17f.summary
-                    benign_exceptions   = @("Under review -- pattern was AI-discovered and requires analyst validation")
-                }
-
-                # Append to classes array
-                $classList = [System.Collections.Generic.List[object]]::new()
-                foreach ($cls in $rulesObj.classes) { $classList.Add($cls) }
-                $classList.Add($newClass)
-                $rulesObj.classes       = $classList.ToArray()
-                $rulesObj.last_updated  = [datetime]::UtcNow.ToString('yyyy-MM-dd')
-
-                $rulesJson = $rulesObj | ConvertTo-Json -Depth 10
-                [System.IO.File]::WriteAllText($rulesPath, $rulesJson, [System.Text.Encoding]::UTF8)
-                Write-Verbose "[LOCK K-phase] Added AI-discovered class $maxId to iis-lock-rules.json"
+                Add-Content -Path $suggestFile -Value ($suggestion | ConvertTo-Json -Depth 6 -Compress) -Encoding utf8
             }
+            Write-Verbose "[LOCK K-phase] $($class17Elevated.Count) AI-surfaced pattern(s) appended to suggested-rules.jsonl (advisory; committed rules NOT modified)"
         }
         catch {
-            Write-Warning "[LOCK K-phase] Could not update iis-lock-rules.json: $_"
+            Write-Warning "[LOCK K-phase] Could not write rule suggestions: $_"
         }
     }
 

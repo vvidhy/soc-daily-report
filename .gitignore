@@ -32,6 +32,9 @@ Thumbs.db
 .vscode/
 .idea/
 
+# Claude Code worktrees (agent isolation checkouts)
+.claude/worktrees/
+
 # Build artifacts
 build/
 dist/
