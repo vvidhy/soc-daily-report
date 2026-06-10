@@ -67,6 +67,7 @@ if (Test-Path $secretsPath) { . $secretsPath }
 . (Join-Path $here 'lock-detector.ps1')
 . (Join-Path $here 'alert-html.ps1')
 . (Join-Path $here 'alert-formatter.ps1')
+. (Join-Path $here 'opus-investigate.ps1')   # Tier 2 AI deep-dive (HIGH only)
 
 Write-IISLog INFO ("=== SOC IIS OP-GL Monitor start === Window={0}h DryRun={1} TestMode={2}" -f $Window, [bool]$DryRun, [bool]$TestMode)
 
@@ -110,6 +111,26 @@ Write-IISLog INFO ("K: HIGH={0} CONFIRMED={1} REVIEW={2} LOGGED={3}" -f `
 
 try { Update-EntityRegistry -Findings $findings; Write-IISLog INFO 'K: entity registry updated' }
 catch { Write-IISLog ERROR ("K: entity registry update failed: {0}" -f $_.Exception.Message) }
+
+# Tier 2: opus deep-dive on HIGH findings only (rare, capped <=5/run, advisory).
+# Token-bounded (opus only); NEVER changes severity; if opus fails it's a no-op and
+# the alert still fires with the deterministic data.
+if ($high.Count -gt 0 -and (Get-Command Invoke-OpusDeepDive -ErrorAction SilentlyContinue)) {
+    $ddDone = 0
+    foreach ($hf in $high) {
+        if ($ddDone -ge 5) { break }
+        $analysis = $null
+        try { $analysis = Invoke-OpusDeepDive -Finding $hf -Config $config } catch { $analysis = $null }
+        if ($analysis) {
+            if ($hf.PSObject.Properties['deep_analysis']) { $hf.deep_analysis = $analysis }
+            else { $hf | Add-Member -NotePropertyName deep_analysis -NotePropertyValue $analysis -Force }
+            Write-IISLog INFO ("K: opus deep-dive attached (anchor {0})" -f $hf.anchor_ip)
+        } else {
+            Write-IISLog WARN ("K: opus deep-dive unavailable for {0} - alert uses deterministic data only" -f $hf.anchor_ip)
+        }
+        $ddDone++
+    }
+}
 
 if ($high.Count -gt 0) {
     $findingsFile = Format-Findings -Findings $high -FindingsDir $findingsDir

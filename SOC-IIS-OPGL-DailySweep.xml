@@ -3,18 +3,17 @@
   <RegistrationInfo>
     <Date>2026-06-10T00:00:00</Date>
     <Author>SOC</Author>
-    <Description>IIS OP-GL log monitoring every 30 minutes (60-min lookback for boundary-overlap, deduped) — behavioral detection plus cross-source correlation</Description>
-    <URI>\SOC-IIS-OPGL-Monitor</URI>
+    <Description>Tier 3: once-daily opus completeness sweep for the IIS OP-GL monitor (advisory report; catches novel attacks signature rules miss). Bounded token cost.</Description>
+    <URI>\SOC-IIS-OPGL-DailySweep</URI>
   </RegistrationInfo>
   <Triggers>
-    <TimeTrigger>
-      <StartBoundary>2026-06-10T00:00:00</StartBoundary>
+    <CalendarTrigger>
+      <StartBoundary>2026-06-10T06:30:00</StartBoundary>
       <Enabled>true</Enabled>
-      <Repetition>
-        <Interval>PT30M</Interval>
-        <StopAtDurationEnd>false</StopAtDurationEnd>
-      </Repetition>
-    </TimeTrigger>
+      <ScheduleByDay>
+        <DaysInterval>1</DaysInterval>
+      </ScheduleByDay>
+    </CalendarTrigger>
   </Triggers>
   <Principals>
     <Principal id="Author">
@@ -39,13 +38,13 @@
     <Hidden>false</Hidden>
     <RunOnlyIfIdle>false</RunOnlyIfIdle>
     <WakeToRun>false</WakeToRun>
-    <ExecutionTimeLimit>PT15M</ExecutionTimeLimit>
+    <ExecutionTimeLimit>PT10M</ExecutionTimeLimit>
     <Priority>7</Priority>
   </Settings>
   <Actions Context="Author">
     <Exec>
       <Command>powershell.exe</Command>
-      <Arguments>-NonInteractive -WindowStyle Hidden -File "D:\Vidhya\soc-monitor\iis-opgl-monitor\iis-opgl-monitor.ps1"</Arguments>
+      <Arguments>-NonInteractive -WindowStyle Hidden -File "D:\Vidhya\soc-monitor\iis-opgl-monitor\iis-opgl-daily-sweep.ps1"</Arguments>
     </Exec>
   </Actions>
 </Task>

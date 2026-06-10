@@ -115,6 +115,13 @@ function Build-FindingHtml {
         [void]$sb.Append(('<p><b>Investigate:</b> <code>{0}</code></p>' -f (Convert-HtmlText $Finding.investigate)))
     }
 
+    # Tier 2 opus deep-dive analysis, if attached (advisory enrichment).
+    if (($Finding.PSObject.Properties['deep_analysis']) -and $Finding.deep_analysis) {
+        $da = (Convert-HtmlText $Finding.deep_analysis) -replace "`r?`n", '<br/>'
+        [void]$sb.Append('<p><b>AI investigation (opus):</b></p>')
+        [void]$sb.Append(('<blockquote>{0}</blockquote>' -f $da))
+    }
+
     [void]$sb.Append(('<p><b>Deep investigation:</b> <a href="{0}">Anthropic Cybersecurity Skills</a></p>' -f $script:DeepInvestUrl))
 
     return $sb.ToString()
