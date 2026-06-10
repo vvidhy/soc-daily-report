@@ -738,10 +738,32 @@ function Invoke-LockScan {
     # CLASS 11 -- CVE / CMS Probe (T1190)
     # ------------------------------------------------------------------
     Write-Verbose "[LOCK] Class 11 -- CVE/CMS Probe"
-    $c11Query = "(URI_Stream:*/wp-admin* OR URI_Stream:*/wp-login* OR URI_Stream:*/.git* OR URI_Stream:*/.env* OR URI_Stream:*/phpinfo* OR URI_Stream:*/actuator* OR URI_Stream:*/manager/html*) AND filebeat_log_file_path:*inetpub*"
-    $c11Agg   = $null
-    try { $c11Agg = mcp__OP-GL__aggregate_logs -streamId $prodStreamId -query $c11Query -rangeSeconds $rangeSeconds } catch {}
-    $c11Count = _Safe-AggCount $c11Agg
+    # Leading-wildcard terms expand heavily; a 7-term OR exceeds Graylog's
+    # maxClauseCount (4096) -> HTTP 500, so the class silently never fired.
+    # Query in OR-groups of <=3 (validated safe) and combine counts + rows.
+    # No leading slash: '*/x*' makes Graylog's wildcard match ~all traffic (846k);
+    # '*x*' is correctly selective (validated: 12/17/27/6/197/131/0 hits/24h).
+    $c11Patterns = @('*wp-admin*','*wp-login*','*phpinfo*','*.git*','*.env*','*actuator*','*manager/html*')
+    $c11Count = 0
+    $c11Rows  = @()
+    $c11QueryParts = @()
+    for ($gi = 0; $gi -lt $c11Patterns.Count; $gi += 3) {
+        $grp      = @($c11Patterns[$gi..([Math]::Min($gi + 2, $c11Patterns.Count - 1))])
+        $orClause = ($grp | ForEach-Object { "URI_Stream:$_" }) -join ' OR '
+        $gQuery   = "($orClause) AND filebeat_log_file_path:*inetpub*"
+        $c11QueryParts += $gQuery
+        $gAgg = $null
+        try { $gAgg = mcp__OP-GL__aggregate_logs -streamId $prodStreamId -query $gQuery -rangeSeconds $rangeSeconds } catch {}
+        $gCount = [long](_Safe-AggCount $gAgg)
+        $c11Count += $gCount
+        if ($gCount -gt 0 -and @($c11Rows).Count -lt 20) {
+            $gRows = @()
+            try { $gRows = _Safe-Results (mcp__OP-GL__search_logs_relative -streamId $prodStreamId -query $gQuery -rangeSeconds $rangeSeconds -fields $script:IIS_FIELDS -limit 20) } catch {}
+            $c11Rows += $gRows
+        }
+    }
+    $c11Query = $c11QueryParts -join ' ; '
+    $c11Rows  = @($c11Rows | Select-Object -First 20)
 
     if ($c11Count -eq 0) {
         $findings.Add((_New-Finding -ClassId 11 -Severity "LOGGED" -Title "Class 11 -- CVE/CMS Probe: Clean window" `
@@ -750,8 +772,6 @@ function Invoke-LockScan {
             -RawQuery $c11Query))
     }
     else {
-        $c11Rows = @()
-        try { $c11Rows = _Safe-Results (mcp__OP-GL__search_logs_relative -streamId $prodStreamId -query $c11Query -rangeSeconds $rangeSeconds -fields $script:IIS_FIELDS -limit 20) } catch {}
         foreach ($row in $c11Rows) {
             $ip     = if ($row.Client_ip)  { $row.Client_ip }  else { "-" }
             $uri    = if ($row.URI_Stream) { $row.URI_Stream } else { "-" }
