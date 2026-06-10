@@ -1154,7 +1154,18 @@ function Invoke-LockScan {
         $findings.Add($f)
     }
 
-    return @($findings)
+    # De-duplicate row-derived findings: row-looping classes (1,3,11,12,16,...) emit
+    # one finding per matching row, so the same IP+URI+status repeats. The title
+    # encodes those, so collapsing identical (class|title) removes duplicate noise
+    # while keeping genuinely distinct findings. post-to-teams also dedups at the
+    # alert layer, but this keeps the finding set and run logs clean.
+    $dedupSeen = @{}
+    $deduped = [System.Collections.Generic.List[PSCustomObject]]::new()
+    foreach ($df in $findings) {
+        $dkey = "$($df.detection_class)|$($df.title)"
+        if (-not $dedupSeen.ContainsKey($dkey)) { $dedupSeen[$dkey] = $true; [void]$deduped.Add($df) }
+    }
+    return @($deduped)
 }
 
 # ---------------------------------------------------------------------------
