@@ -1,0 +1,13 @@
+{
+  "entity-registry.json": {
+    "ips": "key=IP string, value={first_seen:ISO8601, last_seen:ISO8601, seen_count:int, countries:[string], src_ips:[string]}",
+    "users": "key=username string, value={first_seen:ISO8601, last_seen:ISO8601, seen_count:int, countries:[string], src_ips:[string]}",
+    "uris": "key=URI path string, value={first_seen:ISO8601, last_seen:ISO8601, seen_count:int}",
+    "hosts": "key=IIS Host header value, value={first_seen:ISO8601, last_seen:ISO8601, seen_count:int}"
+  },
+  "rate-counters.json": {
+    "description": "Per-run rate windows cleared each run",
+    "key": "entity_type:entity_id",
+    "value": "{window_start:ISO8601, count:int, window_minutes:int}"
+  }
+}
