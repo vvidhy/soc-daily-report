@@ -17,6 +17,11 @@ param(
     [ValidateSet('HIGH', 'REVIEW', 'INFO')]
     [string] $MinSeverity = 'REVIEW',
 
+    # Optional explicit Power Automate webhook. When omitted, falls back to
+    # $env:SOC_TEAMS_WEBHOOK. Lets a dedicated pipeline (e.g. the IIS OP-GL
+    # monitor) target its own channel without clobbering the shared default.
+    [string] $WebhookUrl,
+
     [switch] $DryRun
 )
 
@@ -24,8 +29,11 @@ $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 . (Join-Path $root 'config\secrets.local.ps1')
 
-if (-not $env:SOC_TEAMS_WEBHOOK) {
-    Write-Error 'SOC_TEAMS_WEBHOOK not set. Check config/secrets.local.ps1'
+# Explicit -WebhookUrl wins; otherwise use the shared default from secrets.
+$script:webhook = if ($WebhookUrl) { $WebhookUrl } else { $env:SOC_TEAMS_WEBHOOK }
+
+if (-not $script:webhook) {
+    Write-Error 'No webhook configured. Pass -WebhookUrl or set SOC_TEAMS_WEBHOOK in config/secrets.local.ps1'
     exit 1
 }
 
@@ -88,7 +96,7 @@ function Send-Finding {
         if ($delays[$i] -gt 0) { Start-Sleep -Seconds $delays[$i] }
         try {
             Invoke-RestMethod `
-                -Uri $env:SOC_TEAMS_WEBHOOK `
+                -Uri $script:webhook `
                 -Method Post `
                 -ContentType 'application/json; charset=utf-8' `
                 -Body $bytes `

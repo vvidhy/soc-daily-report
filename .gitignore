@@ -1,5 +1,7 @@
 # Secrets & Credentials
 config/secrets.local.ps1
+**/secrets.local.ps1
+secrets.local.ps1
 *.secret
 *.key
 .env.local
