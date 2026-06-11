@@ -155,8 +155,8 @@ function Build-DigestCardEnvelope {
         (_Tile $nLow  'LOW'      'Good')
     ) })
 
-    # Each finding as a compact block: "IP - what" + Finding + MITRE/Why + Action.
-    # Same shape for every tier; the Why line is what justifies the tier.
+    # Each finding as a compact Who/What/When/Where table (FactSet) + Why/MITRE/Action,
+    # with a paste-ready Graylog query below. Same shape every tier; Why justifies the tier.
     foreach ($grp in @(
         @{ key='critical'; label='CRITICAL - corroborated across systems'; col='Attention' },
         @{ key='high';     label='HIGH - multiple signals on one source';  col='Warning' },
@@ -168,14 +168,22 @@ function Build-DigestCardEnvelope {
         if ($items.Count -eq 0) { continue }
         $body.Add(@{ type='TextBlock'; weight='Bolder'; size='Medium'; color=$grp.col; spacing='Medium'; separator=$true; wrap=$true; text=$grp.label })
         foreach ($it in $items) {
-            $hostSuffix = if ($it.host -and $it.host -ne '-') { "  ($($it.host))" } else { '' }
+            $whatVal  = if ($it.finding) { "{0}: {1}" -f $it.what, $it.finding } else { [string]$it.what }
+            $whereVal = if ($it.host -and $it.host -ne '-') { [string]$it.host } else { '-' }
+            $whenVal  = '-'
+            if ($it.when) { try { $whenVal = ([datetime]$it.when).ToUniversalTime().ToString('MM-dd HH:mm') + ' UTC' } catch { $whenVal = [string]$it.when } }
+            # who / what / when / where (+ why / MITRE / action) as a compact table; query below.
             $line = New-Object System.Collections.Generic.List[object]
-            $line.Add(@{ type='TextBlock'; wrap=$true; weight='Bolder'; spacing='None'; text=("{0}  -  {1}{2}" -f $it.ip, $it.what, $hostSuffix) })
-            if ($it.finding)  { $line.Add(@{ type='TextBlock'; wrap=$true; spacing='None'; isSubtle=$true; text=[string]$it.finding }) }
-            if ($it.evidence) { $line.Add(@{ type='TextBlock'; wrap=$true; spacing='None'; isSubtle=$true; text=("Evidence: {0}" -f [string]$it.evidence) }) }
-            $line.Add(@{ type='TextBlock'; wrap=$true; spacing='None'; isSubtle=$true; text=("MITRE: {0}   |   Why: {1}" -f $it.mitre, $it.why) })
-            $line.Add(@{ type='TextBlock'; wrap=$true; spacing='None'; text=("Action: {0}" -f $it.action) })
-            if ($it.query) { $line.Add(@{ type='TextBlock'; wrap=$true; spacing='None'; isSubtle=$true; fontType='Monospace'; text=("Investigate: {0}" -f [string]$it.query) }) }
+            $line.Add(@{ type='FactSet'; facts=@(
+                @{ title='Who';    value=[string]$it.ip },
+                @{ title='What';   value=$whatVal },
+                @{ title='When';   value=$whenVal },
+                @{ title='Where';  value=$whereVal },
+                @{ title='Why';    value=[string]$it.why },
+                @{ title='MITRE';  value=[string]$it.mitre },
+                @{ title='Action'; value=[string]$it.action }
+            ) })
+            if ($it.query) { $line.Add(@{ type='TextBlock'; wrap=$true; spacing='None'; isSubtle=$true; fontType='Monospace'; text=("Query: {0}" -f [string]$it.query) }) }
             $body.Add(@{ type='Container'; spacing='Small'; style='emphasis'; items=$line.ToArray() })
         }
         if ([int]$tier.total -gt $items.Count) {

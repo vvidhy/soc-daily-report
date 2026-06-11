@@ -77,7 +77,7 @@ function _Items($tier,$h,$cap){
     $shown = @($all | Select-Object -First $cap | ForEach-Object {
         $ev = [string]$_.summary; if ($ev.Length -gt 240) { $ev = $ev.Substring(0,240) + '...' }
         $q  = if ([string]$_.investigate) { [string]$_.investigate } else { 'Client_ip:"' + [string]$_.ip + '" AND filebeat_log_file_path:*inetpub*' }
-        @{ ip=[string]$_.ip; host=[string]$_.host; what=(_Label $_.class); finding=(_Finding $_); evidence=$ev; mitre=[string]$_.technique; why=(_Why $tier $_); query=$q; action=(_Act $_.class) }
+        @{ ip=[string]$_.ip; host=[string]$_.host; when=[string]$_.time; what=(_Label $_.class); finding=(_Finding $_); evidence=$ev; mitre=[string]$_.technique; why=(_Why $tier $_); query=$q; action=(_Act $_.class) }
     })
     @{ items=$shown; total=$all.Count }
 }

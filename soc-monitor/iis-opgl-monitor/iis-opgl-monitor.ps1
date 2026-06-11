@@ -191,6 +191,7 @@ try {
             technique = [string]$df.technique
             ip        = [string]$df.anchor_ip
             host      = [string]$df.anchor_host
+            time      = [string]$df.anchor_time                      # WHEN the activity occurred
             title     = [string]$df.title
             summary   = [string]$df.summary                          # log evidence + why it fired (counts/status/rate)
             investigate = [string]$df.investigate                    # paste-ready Graylog query (real field names)
