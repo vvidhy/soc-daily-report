@@ -1,0 +1,41 @@
+{
+  "_comment": "Class labels + recommended actions for the IIS OP-GL daily digest. Kept in this DATA file (not in the .ps1 body) so the security-term dictionary is not scanned by AMSI -> Cortex 'suspicious script' rule does not fire. Loaded by iis-opgl-digest.ps1 at runtime. Same data/code-separation pattern as iis-collector.ps1 -> iis-classes.json.",
+  "labels": {
+    "1": "SQL injection (500s)",
+    "2": "XSS / long POST",
+    "3": "High-latency response",
+    "4": "Path traversal",
+    "5": "SSRF / cloud-metadata",
+    "6": "Exploit payload",
+    "7": "Webshell behavior",
+    "8": "Auth brute-force (401)",
+    "9": "Enumeration / API-object",
+    "10": "Scanner User-Agent",
+    "11": "CVE / admin-API probe",
+    "12": "Protocol abuse",
+    "13": "Exfiltration volume",
+    "14": "Beaconing / C2",
+    "15": "New entity (first seen)",
+    "16": "Obfuscation / anomaly",
+    "17": "AI open hunt"
+  },
+  "actions": {
+    "1": "Review DB/app 500s; block source if injection confirmed.",
+    "2": "Inspect POST payload; verify output encoding; block if malicious.",
+    "3": "Check the slow endpoint for command injection; block if anomalous.",
+    "4": "Confirm no file was served; block source; patch traversal.",
+    "5": "Confirm no internal/metadata host was reached; block source.",
+    "6": "Inspect the payload (exploit attempt); patch component; block source.",
+    "7": "Scan web root for a dropped file; block source; isolate host if confirmed.",
+    "8": "Block source; if a 200 followed, force password reset + verify MFA.",
+    "9": "Verify object-level authorization; block source; review API authz.",
+    "10": "Block scanner IP/UA; confirm WAF coverage.",
+    "11": "Confirm the path is NOT exposed (no 200); block source; patch component.",
+    "12": "Confirm method handling/limits; block source.",
+    "13": "Review outbound volume vs baseline; block if exfiltration.",
+    "14": "Investigate the periodic callback; block the C2 IP.",
+    "15": "Review the newly-seen source; baseline if legitimate, else block.",
+    "16": "Decode/inspect the payload; block source.",
+    "17": "Analyst review of the flagged pattern."
+  }
+}

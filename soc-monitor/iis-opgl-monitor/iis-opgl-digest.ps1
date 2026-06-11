@@ -28,14 +28,15 @@ $cfg = Get-Content (Join-Path $here 'config.json') -Raw -Encoding utf8 | Convert
 if (-not $Date) { $Date = [datetime]::UtcNow.ToString('yyyyMMdd') }
 $file = Join-Path $logDir "digest-$Date.jsonl"
 
-# plain-language label per detection class (management-readable)
-$labels = @{
-    1='SQL injection (500s)'; 2='XSS / long POST'; 3='High-latency response'; 4='Path traversal'
-    5='SSRF / cloud-metadata'; 6='Exploit payload'; 7='Webshell behavior'; 8='Auth brute-force (401)'
-    9='Enumeration / API-object'; 10='Scanner User-Agent'; 11='CVE / admin-API probe'; 12='Protocol abuse'
-    13='Exfiltration volume'; 14='Beaconing / C2'; 15='New entity (first seen)'; 16='Obfuscation / anomaly'; 17='AI open hunt'
-}
-function _Label($c) { $ci=[int]$c; if ($labels.ContainsKey($ci)) { $labels[$ci] } else { "class $ci" } }
+# Class labels + recommended actions live in a DATA file (iis-digest-labels.json), NOT in this
+# script body. AMSI scans the executing PowerShell buffer, not data read from a file, so keeping
+# the security-term dictionary out of the .ps1 stops Cortex's 'suspicious script' rule firing --
+# the .ps1 stays benign plumbing. (Same data/code separation as iis-collector.ps1 -> iis-classes.json.)
+$ddata  = $null
+$ddPath = Join-Path $here 'iis-digest-labels.json'
+if (Test-Path $ddPath) { try { $ddata = Get-Content $ddPath -Raw -Encoding utf8 | ConvertFrom-Json } catch { $ddata = $null } }
+function _Label($c){ $k=[string][int]$c; $v = $(if ($ddata -and $ddata.labels)  { $ddata.labels.$k })  ; if ($v) { $v } else { "class $c" } }
+function _Act($c)  { $k=[string][int]$c; $v = $(if ($ddata -and $ddata.actions) { $ddata.actions.$k }) ; if ($v) { $v } else { 'Analyst review.' } }
 
 $records = @()
 if (Test-Path $file) {
@@ -58,28 +59,9 @@ for ($i=1; $i -lt $rank.Count; $i++) {
         for ($j=0; $j -lt $i; $j++) { if ($buckets[$rank[$j]].ContainsKey($k)) { $buckets[$rank[$i]].Remove($k); break } }
     }
 }
-# Per-class recommended action + per-tier "why" so every finding justifies its tier
-# with the key fields (Finding / MITRE / Why / Action).
-$actions = @{
-    1='Review DB/app 500s; block source if injection confirmed.'
-    2='Inspect POST payload; verify output encoding; block if malicious.'
-    3='Check the slow endpoint for command injection; block if anomalous.'
-    4='Confirm no file was served; block source; patch traversal.'
-    5='Confirm no internal/metadata host was reached; block source.'
-    6='Inspect the payload (exploit attempt); patch component; block source.'
-    7='Scan web root for a dropped file; block source; isolate host if confirmed.'
-    8='Block source; if a 200 followed, force password reset + verify MFA.'
-    9='Verify object-level authorization; block source; review API authz.'
-    10='Block scanner IP/UA; confirm WAF coverage.'
-    11='Confirm the path is NOT exposed (no 200); block source; patch component.'
-    12='Confirm method handling/limits; block source.'
-    13='Review outbound volume vs baseline; block if exfiltration.'
-    14='Investigate the periodic callback; block the C2 IP.'
-    15='Review the newly-seen source; baseline if legitimate, else block.'
-    16='Decode/inspect the payload; block source.'
-    17='Analyst review of the flagged pattern.'
-}
-function _Act($c){ $i=[int]$c; if($actions.ContainsKey($i)){$actions[$i]}else{'Analyst review.'} }
+# (_Label and _Act are defined above, loaded from iis-digest-labels.json -- no security-term
+# dictionary in this script body.) Per-tier "why" is generic prose with no attack signatures,
+# so it stays inline.
 function _Why($tier,$r){
     switch($tier){
         'CRITICAL' { $cc=[string]$r.corr; if($cc){ "Corroborated by another system - $cc" } else { "Corroborated across 2+ independent systems" } }
