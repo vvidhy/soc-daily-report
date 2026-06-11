@@ -2,13 +2,14 @@
   opus-investigate.ps1 - Tier 2 & Tier 3 AI hooks for the IIS OP-GL monitor.
 
   DESIGN PRINCIPLES (token-optimization + data-integrity are hard constraints):
-   * The hourly/30-min detection engine calls NO model (0 tokens). opus is used
-     ONLY here, in two surgical, rare, bounded places:
-       Tier 2  Invoke-OpusDeepDive  - per HIGH finding (rare), enriches the alert.
-       Tier 3  Invoke-OpusDailySweep - once per day, catches novel attacks that
-               signature rules miss (the "novel-from-known-entity" gap).
-   * TOKEN CAPS: opus only (no per-row sonnet); inputs are hard-capped row counts;
-     deep-dives are capped per run; sweep runs 1x/day over a bounded candidate set.
+   * The 30-min detection engine calls NO model (0 tokens). AI is used ONLY here,
+     in two surgical, bounded places, SPLIT BY MODEL:
+       Tier 2  Invoke-OpusDeepDive   - deep investigation of a HIGH finding -> OPUS
+               (rare; reasoning depth matters on a confirmed threat).
+       Tier 3  Invoke-OpusDailySweep - hunt/discovery over the anomaly set -> SONNET
+               (cheaper; catches novel attacks signature rules miss). (Name is legacy.)
+   * TOKEN CAPS: inputs are hard-capped row counts; deep-dives capped per run;
+     the discovery hunt runs over a bounded candidate set.
    * DATA INTEGRITY: every prompt forbids fabrication ("analyze ONLY provided data").
      AI output is ADVISORY: it is attached as context (deep_analysis) and NEVER
      changes a finding's deterministic severity, and sweep output is emitted at
@@ -38,13 +39,13 @@ function _Invoke-Opus {
       run. Returns the text, or $null on any failure/timeout (caller treats AI as
       optional enrichment).
     #>
-    param([string] $Prompt, [int] $TimeoutSec = 150)
+    param([string] $Prompt, [int] $TimeoutSec = 150, [string] $Model = 'opus')
     if (-not $script:ClaudeCmd) { return $null }
     $inF  = [System.IO.Path]::GetTempFileName()
     $outF = [System.IO.Path]::GetTempFileName()
     try {
         [System.IO.File]::WriteAllText($inF, $Prompt, [System.Text.UTF8Encoding]::new($false))
-        $p = Start-Process -FilePath $script:ClaudeCmd -ArgumentList '-p','--model','opus' `
+        $p = Start-Process -FilePath $script:ClaudeCmd -ArgumentList '-p','--model',$Model `
                 -RedirectStandardInput $inF -RedirectStandardOutput $outF `
                 -NoNewWindow -PassThru
         if ($p.WaitForExit($TimeoutSec * 1000)) {
@@ -216,7 +217,7 @@ $crossJson
 == ANCHOR IIS REQUESTS (last 1h, up to 15) ==
 $iisJson
 "@
-    $result = _Invoke-Opus -Prompt $prompt -TimeoutSec 200
+    $result = _Invoke-Opus -Prompt $prompt -TimeoutSec 200 -Model 'opus'   # deep investigation -> Opus
     if ($result) { return ("[skill applied: {0}]`r`n{1}" -f $skill.name, $result) }
     return $null
 }
@@ -284,5 +285,5 @@ Rules:
 CANDIDATE ROWS ($($cand.Count)):
 $json
 "@
-    return (_Invoke-Opus -Prompt $prompt -TimeoutSec 180)
+    return (_Invoke-Opus -Prompt $prompt -TimeoutSec 180 -Model 'sonnet')   # hunt/discovery -> Sonnet
 }
