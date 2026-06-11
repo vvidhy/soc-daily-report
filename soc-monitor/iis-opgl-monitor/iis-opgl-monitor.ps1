@@ -175,4 +175,23 @@ $summary = [ordered]@{
     high               = $high.Count
 }
 $summary | ConvertTo-Json -Depth 5 | Out-File (Join-Path $logDir 'last-run.json') -Encoding utf8
+
+# Daily digest accumulation -- append REVIEW/CONFIRMED (everything below the HIGH
+# alert bar) to a dated file so the once-daily digest can surface what was caught
+# WITHOUT lowering the alert bar. Best-effort: wrapped so it can never affect a run.
+try {
+    $digestFile = Join-Path $logDir ("digest-{0}.jsonl" -f ([datetime]::UtcNow.ToString('yyyyMMdd')))
+    foreach ($df in (@($high) + @($confirmed) + @($review))) {
+        ([ordered]@{
+            ts        = [datetime]::UtcNow.ToString('o')
+            severity  = [string]$df.severity
+            class     = $df.detection_class
+            technique = [string]$df.technique
+            ip        = [string]$df.anchor_ip
+            host      = [string]$df.anchor_host
+            title     = [string]$df.title
+        } | ConvertTo-Json -Compress) | Add-Content -Path $digestFile -Encoding utf8
+    }
+} catch { Write-IISLog WARN ("digest accumulation failed: {0}" -f $_.Exception.Message) }
+
 Write-IISLog INFO '=== run complete ==='

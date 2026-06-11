@@ -122,3 +122,60 @@ function Build-SweepCardEnvelope {
         attachments = @(@{ contentType = 'application/vnd.microsoft.card.adaptive'; content = $card })
     }
 }
+
+function Build-DigestCardEnvelope {
+    # Daily activity digest -- VISIBILITY into what was caught below the HIGH alert bar.
+    # Two audiences in one clean card: a plain-language posture line + counts for
+    # management, then a confirmed-items list and a by-type review breakdown for the SOC.
+    # $Digest = @{ date; high; confirmed_count; review_count;
+    #              confirmed=@(@{ip;host;what}); review_cats=@(@{name;count;ip}); graylog_link }
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][hashtable] $Digest)
+
+    $high = [int]$Digest.high; $cc = [int]$Digest.confirmed_count; $rc = [int]$Digest.review_count
+    $postureColor = if ($high -gt 0) { 'Attention' } elseif ($cc -gt 0) { 'Warning' } else { 'Good' }
+    $postureText = if ($high -gt 0) { "ACTION - $high high-severity alert(s) raised today" } elseif ($cc -gt 0) { "$cc confirmed item(s) for analyst review" } else { "NOMINAL - no corroborated threats today" }
+    $plain = if ($high -gt 0) { "$high corroborated HIGH alert(s) were raised today and sent to this channel in real time. Below: $cc confirmed item(s) and $rc item(s) under review." } else { "No corroborated breach today (HIGH alerts = 0). The web-attack monitor flagged $cc confirmed item(s) for analyst follow-up and $rc item(s) under review. Items below; everything else is routine external scanning." }
+
+    $body = New-Object System.Collections.Generic.List[object]
+    $body.Add(@{ type='TextBlock'; size='Large'; weight='Bolder'; color='Accent'; wrap=$true; text='IIS OP-GL - Daily Activity Digest' })
+    $body.Add(@{ type='TextBlock'; isSubtle=$true; spacing='None'; wrap=$true; text=("{0} | informational | public web-server monitoring" -f $Digest.date) })
+    $body.Add(@{ type='TextBlock'; weight='Bolder'; size='Medium'; color=$postureColor; spacing='Medium'; wrap=$true; text=("Posture: {0}" -f $postureText) })
+    $body.Add(@{ type='FactSet'; facts=@(
+        @{ title='HIGH alerts';  value=[string]$high },
+        @{ title='Confirmed';    value=[string]$cc },
+        @{ title='Under review'; value=[string]$rc }
+    ) })
+    $body.Add(@{ type='TextBlock'; wrap=$true; spacing='Small'; text=$plain })
+
+    if (@($Digest.confirmed).Count -gt 0) {
+        $body.Add(@{ type='TextBlock'; weight='Bolder'; spacing='Medium'; separator=$true; text='Confirmed - worth an analyst look' })
+        foreach ($it in $Digest.confirmed) {
+            $h = if ($it.host -and $it.host -ne '-') { " ($($it.host))" } else { '' }
+            $body.Add(@{ type='TextBlock'; wrap=$true; spacing='None'; text=("- **{0}**: {1}{2}" -f $it.ip, $it.what, $h) })
+        }
+    }
+    if (@($Digest.review_cats).Count -gt 0) {
+        $body.Add(@{ type='TextBlock'; weight='Bolder'; spacing='Medium'; separator=$true; text='Under review - by type' })
+        foreach ($c in $Digest.review_cats) {
+            $eg = if ($c.ip) { "  (e.g. $($c.ip))" } else { '' }
+            $body.Add(@{ type='TextBlock'; wrap=$true; spacing='None'; isSubtle=$true; text=("- {0}: **{1}**{2}" -f $c.name, $c.count, $eg) })
+        }
+    }
+    $body.Add(@{ type='TextBlock'; isSubtle=$true; spacing='Medium'; wrap=$true; text='Informational summary. Corroborated HIGH threats are alerted separately, in real time. REVIEW = recorded for awareness; CONFIRMED = multiple signals on one source.' })
+
+    $actions = New-Object System.Collections.Generic.List[object]
+    if ($Digest.graylog_link) { $actions.Add(@{ type='Action.OpenUrl'; title='Open in Graylog'; url=[string]$Digest.graylog_link }) }
+
+    $card = [ordered]@{
+        '$schema' = 'http://adaptivecards.io/schemas/adaptive-card.json'
+        type      = 'AdaptiveCard'
+        version   = '1.4'
+        body      = $body.ToArray()
+        actions   = $actions.ToArray()
+    }
+    return @{
+        type        = 'message'
+        attachments = @(@{ contentType = 'application/vnd.microsoft.card.adaptive'; content = $card })
+    }
+}
