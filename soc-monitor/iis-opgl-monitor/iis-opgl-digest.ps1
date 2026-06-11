@@ -75,7 +75,9 @@ function _Finding($r){ ([regex]::Replace([string]$r.title, '^Class\s+\S+\s*--\s*
 function _Items($tier,$h,$cap){
     $all = @($h.Values)
     $shown = @($all | Select-Object -First $cap | ForEach-Object {
-        @{ ip=[string]$_.ip; host=[string]$_.host; what=(_Label $_.class); finding=(_Finding $_); mitre=[string]$_.technique; why=(_Why $tier $_); action=(_Act $_.class) }
+        $ev = [string]$_.summary; if ($ev.Length -gt 240) { $ev = $ev.Substring(0,240) + '...' }
+        $q  = if ([string]$_.investigate) { [string]$_.investigate } else { 'Client_ip:"' + [string]$_.ip + '" AND filebeat_log_file_path:*inetpub*' }
+        @{ ip=[string]$_.ip; host=[string]$_.host; what=(_Label $_.class); finding=(_Finding $_); evidence=$ev; mitre=[string]$_.technique; why=(_Why $tier $_); query=$q; action=(_Act $_.class) }
     })
     @{ items=$shown; total=$all.Count }
 }
@@ -147,10 +149,10 @@ $glink = 'https://siem.secureocp.com/search?q=' + [Uri]::EscapeDataString('fileb
 $digest = @{
     date     = $dateDisp
     counts   = @{ CRITICAL=@($buckets.CRITICAL.Keys).Count; HIGH=@($buckets.HIGH.Keys).Count; MODERATE=@($buckets.MODERATE.Keys).Count; LOW=@($buckets.LOW.Keys).Count }
-    critical = (_Items 'CRITICAL' $buckets.CRITICAL 10)
-    high     = (_Items 'HIGH'     $buckets.HIGH     10)
-    moderate = (_Items 'MODERATE' $buckets.MODERATE 6)
-    low      = (_Items 'LOW'      $buckets.LOW      5)
+    critical = (_Items 'CRITICAL' $buckets.CRITICAL 8)
+    high     = (_Items 'HIGH'     $buckets.HIGH     6)
+    moderate = (_Items 'MODERATE' $buckets.MODERATE 5)
+    low      = (_Items 'LOW'      $buckets.LOW      4)
     suggestions = $suggList
     graylog_link = $glink
 }

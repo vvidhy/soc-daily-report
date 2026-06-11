@@ -171,9 +171,11 @@ function Build-DigestCardEnvelope {
             $hostSuffix = if ($it.host -and $it.host -ne '-') { "  ($($it.host))" } else { '' }
             $line = New-Object System.Collections.Generic.List[object]
             $line.Add(@{ type='TextBlock'; wrap=$true; weight='Bolder'; spacing='None'; text=("{0}  -  {1}{2}" -f $it.ip, $it.what, $hostSuffix) })
-            if ($it.finding) { $line.Add(@{ type='TextBlock'; wrap=$true; spacing='None'; isSubtle=$true; text=[string]$it.finding }) }
+            if ($it.finding)  { $line.Add(@{ type='TextBlock'; wrap=$true; spacing='None'; isSubtle=$true; text=[string]$it.finding }) }
+            if ($it.evidence) { $line.Add(@{ type='TextBlock'; wrap=$true; spacing='None'; isSubtle=$true; text=("Evidence: {0}" -f [string]$it.evidence) }) }
             $line.Add(@{ type='TextBlock'; wrap=$true; spacing='None'; isSubtle=$true; text=("MITRE: {0}   |   Why: {1}" -f $it.mitre, $it.why) })
             $line.Add(@{ type='TextBlock'; wrap=$true; spacing='None'; text=("Action: {0}" -f $it.action) })
+            if ($it.query) { $line.Add(@{ type='TextBlock'; wrap=$true; spacing='None'; isSubtle=$true; fontType='Monospace'; text=("Investigate: {0}" -f [string]$it.query) }) }
             $body.Add(@{ type='Container'; spacing='Small'; style='emphasis'; items=$line.ToArray() })
         }
         if ([int]$tier.total -gt $items.Count) {
