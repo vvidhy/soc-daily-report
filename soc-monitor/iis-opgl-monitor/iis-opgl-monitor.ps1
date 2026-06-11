@@ -176,12 +176,14 @@ $summary = [ordered]@{
 }
 $summary | ConvertTo-Json -Depth 5 | Out-File (Join-Path $logDir 'last-run.json') -Encoding utf8
 
-# Daily digest accumulation -- append REVIEW/CONFIRMED (everything below the HIGH
-# alert bar) to a dated file so the once-daily digest can surface what was caught
-# WITHOUT lowering the alert bar. Best-effort: wrapped so it can never affect a run.
+# Daily digest accumulation -- append every non-clean finding (HIGH/CONFIRMED/REVIEW +
+# notable LOGGED probe hits) to a dated file so the once-daily digest can surface the
+# full Critical/High/Moderate/Low picture WITHOUT lowering the alert bar. Best-effort:
+# wrapped so it can never affect a run. ('Clean window'/'below threshold' = no activity.)
 try {
     $digestFile = Join-Path $logDir ("digest-{0}.jsonl" -f ([datetime]::UtcNow.ToString('yyyyMMdd')))
-    foreach ($df in (@($high) + @($confirmed) + @($review))) {
+    $loggedNotable = @($findings | Where-Object { $_.severity -eq 'LOGGED' -and ([string]$_.title -notmatch 'Clean window|below threshold|No ') })
+    foreach ($df in (@($high) + @($confirmed) + @($review) + $loggedNotable)) {
         ([ordered]@{
             ts        = [datetime]::UtcNow.ToString('o')
             severity  = [string]$df.severity

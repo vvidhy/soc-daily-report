@@ -132,37 +132,56 @@ function Build-DigestCardEnvelope {
     [CmdletBinding()]
     param([Parameter(Mandatory)][hashtable] $Digest)
 
-    $high = [int]$Digest.high; $cc = [int]$Digest.confirmed_count; $rc = [int]$Digest.review_count
-    $postureColor = if ($high -gt 0) { 'Attention' } elseif ($cc -gt 0) { 'Warning' } else { 'Good' }
-    $postureText = if ($high -gt 0) { "ACTION - $high high-severity alert(s) raised today" } elseif ($cc -gt 0) { "$cc confirmed item(s) for analyst review" } else { "NOMINAL - no corroborated threats today" }
-    $plain = if ($high -gt 0) { "$high corroborated HIGH alert(s) were raised today and sent to this channel in real time. Below: $cc confirmed item(s) and $rc item(s) under review." } else { "No corroborated breach today (HIGH alerts = 0). The web-attack monitor flagged $cc confirmed item(s) for analyst follow-up and $rc item(s) under review. Items below; everything else is routine external scanning." }
+    $c = $Digest.counts
+    $nCrit=[int]$c.CRITICAL; $nHigh=[int]$c.HIGH; $nMod=[int]$c.MODERATE; $nLow=[int]$c.LOW
+    $postureColor = if ($nCrit -gt 0) { 'Attention' } elseif ($nHigh -gt 0) { 'Warning' } else { 'Good' }
+    $postureText  = if ($nCrit -gt 0) { "ACTION - $nCrit critical (corroborated) finding(s) today" } elseif ($nHigh -gt 0) { "REVIEW - $nHigh high finding(s); no corroborated critical" } else { "NOMINAL - no critical or high findings today" }
+
+    function _Tile($n,$label,$col){
+        @{ type='Column'; width='stretch'; style='emphasis'; spacing='Small'; items=@(
+            @{ type='TextBlock'; text=[string]$n; size='ExtraLarge'; weight='Bolder'; color=$col; horizontalAlignment='Center'; spacing='None' },
+            @{ type='TextBlock'; text=$label; size='Small'; weight='Bolder'; isSubtle=$true; horizontalAlignment='Center'; spacing='None' }
+        ) }
+    }
 
     $body = New-Object System.Collections.Generic.List[object]
-    $body.Add(@{ type='TextBlock'; size='Large'; weight='Bolder'; color='Accent'; wrap=$true; text='IIS OP-GL - Daily Activity Digest' })
-    $body.Add(@{ type='TextBlock'; isSubtle=$true; spacing='None'; wrap=$true; text=("{0} | informational | public web-server monitoring" -f $Digest.date) })
+    $body.Add(@{ type='TextBlock'; size='Large'; weight='Bolder'; color='Accent'; wrap=$true; text='IIS OP-GL - Daily Security Digest' })
+    $body.Add(@{ type='TextBlock'; isSubtle=$true; spacing='None'; wrap=$true; text=("{0}  |  OP-GL web-server (siem.secureocp.com)  |  informational" -f $Digest.date) })
     $body.Add(@{ type='TextBlock'; weight='Bolder'; size='Medium'; color=$postureColor; spacing='Medium'; wrap=$true; text=("Posture: {0}" -f $postureText) })
-    $body.Add(@{ type='FactSet'; facts=@(
-        @{ title='HIGH alerts';  value=[string]$high },
-        @{ title='Confirmed';    value=[string]$cc },
-        @{ title='Under review'; value=[string]$rc }
+    $body.Add(@{ type='ColumnSet'; spacing='Medium'; columns=@(
+        (_Tile $nCrit 'CRITICAL' 'Attention'),
+        (_Tile $nHigh 'HIGH'     'Warning'),
+        (_Tile $nMod  'MODERATE' 'Accent'),
+        (_Tile $nLow  'LOW'      'Good')
     ) })
-    $body.Add(@{ type='TextBlock'; wrap=$true; spacing='Small'; text=$plain })
 
-    if (@($Digest.confirmed).Count -gt 0) {
-        $body.Add(@{ type='TextBlock'; weight='Bolder'; spacing='Medium'; separator=$true; text='Confirmed - worth an analyst look' })
-        foreach ($it in $Digest.confirmed) {
-            $h = if ($it.host -and $it.host -ne '-') { " ($($it.host))" } else { '' }
-            $body.Add(@{ type='TextBlock'; wrap=$true; spacing='None'; text=("- **{0}**: {1}{2}" -f $it.ip, $it.what, $h) })
+    foreach ($grp in @(
+        @{ key='critical'; label='Critical - corroborated across systems'; col='Attention' },
+        @{ key='high';     label='High - multiple signals on one source';  col='Warning' }
+    )) {
+        $items = @($Digest[$grp.key])
+        if ($items.Count -gt 0) {
+            $body.Add(@{ type='TextBlock'; weight='Bolder'; size='Medium'; color=$grp.col; spacing='Medium'; separator=$true; wrap=$true; text=$grp.label })
+            foreach ($it in $items) {
+                $h = if ($it.host -and $it.host -ne '-') { " ($($it.host))" } else { '' }
+                $body.Add(@{ type='TextBlock'; wrap=$true; spacing='None'; text=("- **{0}** - {1}{2}" -f $it.ip, $it.what, $h) })
+            }
         }
     }
-    if (@($Digest.review_cats).Count -gt 0) {
-        $body.Add(@{ type='TextBlock'; weight='Bolder'; spacing='Medium'; separator=$true; text='Under review - by type' })
-        foreach ($c in $Digest.review_cats) {
-            $eg = if ($c.ip) { "  (e.g. $($c.ip))" } else { '' }
-            $body.Add(@{ type='TextBlock'; wrap=$true; spacing='None'; isSubtle=$true; text=("- {0}: **{1}**{2}" -f $c.name, $c.count, $eg) })
+    foreach ($grp in @(
+        @{ key='moderate'; label='Moderate - under review (by type)'; },
+        @{ key='low';      label='Low - probes, no success (by type)'; }
+    )) {
+        $cats = @($Digest[$grp.key])
+        if ($cats.Count -gt 0) {
+            $body.Add(@{ type='TextBlock'; weight='Bolder'; spacing='Medium'; separator=$true; wrap=$true; text=$grp.label })
+            foreach ($ct in $cats) {
+                $eg = if ($ct.ip) { "  (e.g. $($ct.ip))" } else { '' }
+                $body.Add(@{ type='TextBlock'; wrap=$true; spacing='None'; isSubtle=$true; text=("- {0}: **{1}**{2}" -f $ct.name, $ct.count, $eg) })
+            }
         }
     }
-    $body.Add(@{ type='TextBlock'; isSubtle=$true; spacing='Medium'; wrap=$true; text='Informational summary. Corroborated HIGH threats are alerted separately, in real time. REVIEW = recorded for awareness; CONFIRMED = multiple signals on one source.' })
+    $body.Add(@{ type='TextBlock'; isSubtle=$true; spacing='Medium'; separator=$true; wrap=$true; text='Detection runs every 30 min (0 AI tokens); CRITICAL/HIGH (corroborated) are also alerted live. Tiers - CRITICAL: corroborated across >=2 systems; HIGH: multiple signals on one source; MODERATE: new entity / threshold; LOW: recorded probe that did not succeed.' })
 
     $actions = New-Object System.Collections.Generic.List[object]
     if ($Digest.graylog_link) { $actions.Add(@{ type='Action.OpenUrl'; title='Open in Graylog'; url=[string]$Digest.graylog_link }) }

@@ -43,40 +43,41 @@ if (Test-Path $file) {
 }
 Write-DigestLog INFO ("read {0} record(s) from {1}" -f @($records).Count, (Split-Path $file -Leaf))
 
-# Dedup by class|ip per tier (one row per distinct source+pattern across the day).
-$hi = @{}; $conf = @{}; $rev = @{}
+# Bucket each finding into a report tier, dedup by class|ip within the tier.
+#   HIGH -> CRITICAL (corroborated) | CONFIRMED -> HIGH | REVIEW -> MODERATE | LOGGED -> LOW
+$tierOf  = @{ HIGH='CRITICAL'; CONFIRMED='HIGH'; REVIEW='MODERATE'; LOGGED='LOW' }
+$rank    = 'CRITICAL','HIGH','MODERATE','LOW'
+$buckets = @{ CRITICAL=@{}; HIGH=@{}; MODERATE=@{}; LOW=@{} }
 foreach ($r in $records) {
-    $key = "{0}|{1}" -f $r.class, $r.ip
-    switch ([string]$r.severity) {
-        'HIGH'      { $hi[$key]   = $r }
-        'CONFIRMED' { $conf[$key] = $r }
-        default     { $rev[$key]  = $r }
+    $t = $tierOf[[string]$r.severity]; if (-not $t) { $t = 'MODERATE' }
+    $buckets[$t]["{0}|{1}" -f $r.class, $r.ip] = $r
+}
+# A source in a higher tier for a class is not re-counted in a lower tier.
+for ($i=1; $i -lt $rank.Count; $i++) {
+    foreach ($k in @($buckets[$rank[$i]].Keys)) {
+        for ($j=0; $j -lt $i; $j++) { if ($buckets[$rank[$j]].ContainsKey($k)) { $buckets[$rank[$i]].Remove($k); break } }
     }
 }
-# A source confirmed/high for a class shouldn't also be double-counted under review.
-foreach ($k in @($rev.Keys)) { if ($conf.ContainsKey($k) -or $hi.ContainsKey($k)) { $rev.Remove($k) } }
-
-$confItems = @($conf.Values | ForEach-Object { @{ ip = [string]$_.ip; host = [string]$_.host; what = (_Label $_.class) } } | Select-Object -First 12)
-$revCats   = @($rev.Values | Group-Object class | ForEach-Object {
-                 @{ name = (_Label $_.Name); count = $_.Count
-                    ip = @($_.Group | ForEach-Object { $_.ip } | Where-Object { $_ -and $_ -ne '-' } | Select-Object -First 1) }
-             } | Sort-Object { -$_.count } | Select-Object -First 10)
+# Serious tiers (Critical/High) -> itemised; noisy tiers (Moderate/Low) -> grouped by type.
+function _Items($h,$cap){ @($h.Values | ForEach-Object { @{ ip=[string]$_.ip; host=[string]$_.host; what=(_Label $_.class) } } | Select-Object -First $cap) }
+function _Cats($h,$cap){ @($h.Values | Group-Object class | ForEach-Object {
+        @{ name=(_Label $_.Name); count=$_.Count; ip=@($_.Group | ForEach-Object { $_.ip } | Where-Object { $_ -and $_ -ne '-' } | Select-Object -First 1) }
+    } | Sort-Object { -$_.count } | Select-Object -First $cap) }
 
 $dateDisp = try { [datetime]::ParseExact($Date,'yyyyMMdd',$null).ToString('yyyy-MM-dd') } catch { $Date }
 $glink = 'https://siem.secureocp.com/search?q=' + [Uri]::EscapeDataString('filebeat_log_file_path:*inetpub*') +
          "&rangetype=relative&relative=86400&streams=$($cfg.iis_streams.prod)"
 
 $digest = @{
-    date            = $dateDisp
-    high            = @($hi.Keys).Count
-    confirmed_count = @($conf.Keys).Count
-    review_count    = @($rev.Keys).Count
-    confirmed       = $confItems
-    review_cats     = $revCats
-    graylog_link    = $glink
+    date     = $dateDisp
+    counts   = @{ CRITICAL=@($buckets.CRITICAL.Keys).Count; HIGH=@($buckets.HIGH.Keys).Count; MODERATE=@($buckets.MODERATE.Keys).Count; LOW=@($buckets.LOW.Keys).Count }
+    critical = (_Items $buckets.CRITICAL 8)
+    high     = (_Items $buckets.HIGH 8)
+    moderate = (_Cats  $buckets.MODERATE 8)
+    low      = (_Cats  $buckets.LOW 8)
+    graylog_link = $glink
 }
-
-Write-Host ("Digest {0}: HIGH={1} CONFIRMED={2} REVIEW(distinct)={3}" -f $dateDisp, $digest.high, $digest.confirmed_count, $digest.review_count)
+Write-Host ("Digest {0}: CRITICAL={1} HIGH={2} MODERATE={3} LOW={4}" -f $dateDisp,$digest.counts.CRITICAL,$digest.counts.HIGH,$digest.counts.MODERATE,$digest.counts.LOW)
 
 if ($env:SOC_IIS_OPGL_WEBHOOK) {
     try {
