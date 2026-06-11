@@ -81,3 +81,38 @@ function Build-AdaptiveCardEnvelope {
         attachments = @(@{ contentType = 'application/vnd.microsoft.card.adaptive'; content = $card })
     }
 }
+
+function Build-SweepCardEnvelope {
+    # Tier-3 daily completeness sweep card. INFORMATIONAL / advisory - deliberately
+    # styled apart from HIGH alerts (Accent header, "advisory" footer) so the channel
+    # reader never confuses a sweep note with a corroborated HIGH alert.
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string] $ReportText,
+        [int]    $WindowHours = 24,
+        [string] $GeneratedUtc,
+        [string] $GraylogLink
+    )
+    $txt = if ($ReportText.Length -gt 6000) { $ReportText.Substring(0,6000) + "`r`n... (truncated; see full report file)" } else { $ReportText }
+
+    $body = New-Object System.Collections.Generic.List[object]
+    $body.Add(@{ type='TextBlock'; size='Large'; weight='Bolder'; color='Accent'; wrap=$true; text='IIS OP-GL - Daily completeness sweep' })
+    $body.Add(@{ type='TextBlock'; isSubtle=$true; wrap=$true; text=("Tier 3 - opus - ADVISORY - last {0}h - {1}" -f $WindowHours, $GeneratedUtc) })
+    $body.Add(@{ type='Container'; style='emphasis'; separator=$true; items=@(@{ type='TextBlock'; wrap=$true; text=$txt }) })
+    $body.Add(@{ type='TextBlock'; isSubtle=$true; wrap=$true; text='Advisory only - not a HIGH alert; AI hunches are never auto-escalated.' })
+
+    $actions = New-Object System.Collections.Generic.List[object]
+    if ($GraylogLink) { $actions.Add(@{ type='Action.OpenUrl'; title='Open in Graylog'; url=$GraylogLink }) }
+
+    $card = [ordered]@{
+        '$schema' = 'http://adaptivecards.io/schemas/adaptive-card.json'
+        type      = 'AdaptiveCard'
+        version   = '1.4'
+        body      = $body.ToArray()
+        actions   = $actions.ToArray()
+    }
+    return @{
+        type        = 'message'
+        attachments = @(@{ contentType = 'application/vnd.microsoft.card.adaptive'; content = $card })
+    }
+}

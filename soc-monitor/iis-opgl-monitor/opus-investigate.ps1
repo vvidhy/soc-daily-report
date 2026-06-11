@@ -251,19 +251,23 @@ function Invoke-OpusDailySweep {
     }
     # Hard cap the candidate set (token bound).
     $cand = @($cand | Select-Object -First 40 Client_ip,Method,Status,URI_Stream,URI_Query,Host,UserAgent)
-    if ($cand.Count -eq 0) { return "Daily sweep: no candidate anomalies (500/403/rare-method) in the last $WindowHours h." }
+    if ($cand.Count -eq 0) { return "**Sweep verdict:** No candidate anomalies (500/403/rare-method) in the last $WindowHours h - clean." }
 
     $json = $cand | ConvertTo-Json -Compress
     $prompt = @"
-You are a senior SOC analyst running a daily completeness sweep over the most
-UNUSUAL IIS requests from the last $WindowHours hours. Signature rules already
-cover obvious SQLi/XSS/path-traversal/webshell/CVE-probe/auth-storm. Your job is
-to find anything SUBTLE those rules miss: business-logic abuse, novel exploitation,
-slow recon, suspicious sequences. Base your analysis ONLY on the rows below - do
-NOT invent anything. List at most 5 items, each: IP, why suspicious, confidence
-(low/med/high), recommended action. If nothing is genuinely suspicious, say
-"No novel patterns - routine error/method noise." Be concise. Plain text only -
-no markdown, asterisks, or backticks.
+You are a senior SOC analyst running a daily completeness sweep over the most UNUSUAL
+IIS requests from the last $WindowHours hours. Signature rules already cover obvious
+SQLi/XSS/path-traversal/webshell/CVE-probe/auth-storm. Find anything SUBTLE those rules
+miss: business-logic abuse, novel exploitation, slow recon, suspicious sequences. Base
+your analysis ONLY on the rows below - invent nothing.
+
+WRITE FOR CLARITY for a Teams card that analysts of all levels read:
+- Light markdown: **bold** labels and "- " bullets. No backticks, code fences, or "#" headings.
+- First line EXACTLY: **Sweep verdict:** then either "No novel patterns - routine error/method noise" or "<N> item(s) to review".
+- Then at most 5 items, one bullet each, in this shape:
+  - **<IP>** - why suspicious (one phrase) - confidence: low/med/high - action - query: <paste-ready Graylog query>
+- In any query use REAL OP-GL fields: Client_ip, URI_Stream, URI_Query, Method, Status, Host, UserAgent.
+- Keep the whole thing under ~200 words.
 
 CANDIDATE ROWS ($($cand.Count)):
 $json
