@@ -180,6 +180,12 @@ function Build-DigestCardEnvelope {
             $body.Add(@{ type='TextBlock'; wrap=$true; spacing='Small'; isSubtle=$true; text=("+ {0} more - see Open in Graylog" -f ([int]$tier.total - $items.Count)) })
         }
     }
+    if ($Digest.suggestions -and @($Digest.suggestions).Count -gt 0) {
+        $body.Add(@{ type='TextBlock'; weight='Bolder'; size='Medium'; color='Accent'; spacing='Medium'; separator=$true; wrap=$true; text='Suggestions to improve detection (auto - learned from recurrence)' })
+        foreach ($s in $Digest.suggestions) {
+            $body.Add(@{ type='TextBlock'; wrap=$true; spacing='Small'; text=("- {0}" -f [string]$s) })
+        }
+    }
     $body.Add(@{ type='TextBlock'; isSubtle=$true; spacing='Medium'; separator=$true; wrap=$true; text='Detection runs every 30 min (0 AI tokens); CRITICAL/HIGH (corroborated) are also alerted live. Tiers - CRITICAL: corroborated across >=2 systems; HIGH: multiple signals on one source; MODERATE: new entity / threshold; LOW: recorded probe that did not succeed.' })
 
     $actions = New-Object System.Collections.Generic.List[object]

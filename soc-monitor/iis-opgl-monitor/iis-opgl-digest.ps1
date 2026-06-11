@@ -80,6 +80,66 @@ function _Items($tier,$h,$cap){
     @{ items=$shown; total=$all.Count }
 }
 
+# ---- Learn across days: recurrence history -> deterministic tuning suggestions (0 tokens, no AI) ----
+# Tracks each finding-signature's recurrence in logs\finding-history.json, then turns it into
+# actionable suggestions: allow-list recurring benign noise, escalate persistent sources, flag
+# anomaly waves / high-volume classes. Generic prose only (class labels come from the data file),
+# so this stays Cortex-clean. Wrapped so a bug here can never block the card from posting.
+$suggList = @()
+try {
+    $today    = $Date
+    $histPath = Join-Path $logDir 'finding-history.json'
+    $sevRank  = @{ CRITICAL=4; HIGH=3; MODERATE=2; LOW=1 }
+    function _Sig($r){
+        $f = ([string]$r.title).ToLower()
+        $f = [regex]::Replace($f, '(?:\d{1,3}\.){3}\d{1,3}', '<ip>')   # collapse IPs so sources group
+        $f = [regex]::Replace($f, '\d+', '#')                          # collapse counts (12 vs 47 hits)
+        return ("{0}|{1}" -f $r.class, (($f -replace '\s+',' ').Trim()))
+    }
+    $hist = @{}
+    if (Test-Path $histPath) { try { (Get-Content $histPath -Raw -Encoding utf8 | ConvertFrom-Json) | ForEach-Object { if ($_.sig) { $hist[[string]$_.sig] = $_ } } } catch { $hist = @{} } }
+    $todaySig = @{}
+    foreach ($tn in $rank) {
+        foreach ($r in $buckets[$tn].Values) {
+            $s = _Sig $r
+            if ((-not $todaySig.ContainsKey($s)) -or ([int]$sevRank[$tn] -gt [int]$sevRank[$todaySig[$s].tier])) {
+                $todaySig[$s] = @{ class=$r.class; ip=[string]$r.ip; tier=$tn }
+            }
+        }
+    }
+    foreach ($s in $todaySig.Keys) {
+        $td = $todaySig[$s]
+        if ($hist.ContainsKey($s)) {
+            $h = $hist[$s]
+            if ([string]$h.lastSeen -ne $today) { $h.days = [int]$h.days + 1; $h.lastSeen = $today }
+            if ([int]$sevRank[$td.tier] -gt [int]$sevRank[[string]$h.maxTier]) { $h.maxTier = $td.tier }
+        } else {
+            $hist[$s] = [pscustomobject]@{ sig=$s; class=$td.class; ip=$td.ip; firstSeen=$today; lastSeen=$today; days=1; maxTier=$td.tier }
+        }
+    }
+    try { (@($hist.Values) | ConvertTo-Json -Depth 5) | Set-Content $histPath -Encoding utf8 } catch {}
+
+    $sugg = New-Object System.Collections.Generic.List[object]
+    foreach ($h in @($hist.Values | Where-Object { [string]$_.lastSeen -eq $today } | Sort-Object @{Expression={[int]$_.days};Descending=$true})) {
+        $d = [int]$h.days; $mx = [int]$sevRank[[string]$h.maxTier]
+        if ($d -ge 3 -and $mx -le 2) {
+            $sugg.Add(("Reduce noise: {0} from {1} has recurred {2} days and never exceeded MODERATE - verify the source; if benign, allow-list it so it stops re-flagging every day." -f (_Label $h.class), $h.ip, $d))
+        } elseif ($d -ge 3 -and $mx -ge 3) {
+            $sugg.Add(("Persistent: {0} from {1} has recurred {2} days and reached {3} - treat as a standing threat; investigate, do NOT allow-list." -f (_Label $h.class), $h.ip, $d, $h.maxTier))
+        }
+    }
+    $classCountToday = @{}
+    foreach ($v in $todaySig.Values) { $cl=[int]$v.class; if (-not $classCountToday.ContainsKey($cl)) { $classCountToday[$cl]=0 }; $classCountToday[$cl]++ }
+    $newCount = if ($classCountToday.ContainsKey(15)) { [int]$classCountToday[15] } else { 0 }
+    if ($newCount -ge 10) { $sugg.Add(("Anomaly wave: {0} never-before-seen sources today - review for a coordinated campaign; expand the baseline if they are legitimate." -f $newCount)) }
+    $topCls = @($classCountToday.GetEnumerator() | Sort-Object Value -Descending | Select-Object -First 1)
+    if ($topCls.Count -gt 0 -and [int]$topCls[0].Value -ge 15) {
+        $sugg.Add(("High volume: {0} fired from {1} distinct sources today - if this is routine scanning, add a broad/ASN allow-list or rate-based suppression to cut review load." -f (_Label $topCls[0].Key), $topCls[0].Value))
+    }
+    if ($sugg.Count -eq 0) { $sugg.Add('No tuning suggestions - detection is stable; no recurring noise, persistent sources, or volume spikes today.') }
+    $suggList = @($sugg | Select-Object -First 6 | ForEach-Object { [string]$_ })
+} catch { $suggList = @() }
+
 $dateDisp = try { [datetime]::ParseExact($Date,'yyyyMMdd',$null).ToString('yyyy-MM-dd') } catch { $Date }
 $glink = 'https://siem.secureocp.com/search?q=' + [Uri]::EscapeDataString('filebeat_log_file_path:*inetpub*') +
          "&rangetype=relative&relative=86400&streams=$($cfg.iis_streams.prod)"
@@ -91,6 +151,7 @@ $digest = @{
     high     = (_Items 'HIGH'     $buckets.HIGH     10)
     moderate = (_Items 'MODERATE' $buckets.MODERATE 6)
     low      = (_Items 'LOW'      $buckets.LOW      5)
+    suggestions = $suggList
     graylog_link = $glink
 }
 Write-Host ("Digest {0}: CRITICAL={1} HIGH={2} MODERATE={3} LOW={4}" -f $dateDisp,$digest.counts.CRITICAL,$digest.counts.HIGH,$digest.counts.MODERATE,$digest.counts.LOW)
