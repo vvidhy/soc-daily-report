@@ -684,6 +684,67 @@ function Invoke-LockScan {
     }
 
     # ------------------------------------------------------------------
+    # CLASS 9b -- API Object Enumeration / IDOR (T1083) -- REST, 0 tokens
+    # One source IP erroring (500/403) across MANY distinct object-scoped API
+    # endpoints in the window = object/ID (IDOR) enumeration -- the FOIAXpress
+    # LookUp / same-requestId pattern the daily opus sweep surfaced, promoted to a
+    # free deterministic check. The opus sweep stays as the backstop for cases
+    # buried beyond the sampled rows (no-miss preserved).
+    # ------------------------------------------------------------------
+    Write-Verbose "[LOCK] Class 9b -- API object enumeration / IDOR"
+    $c9bThreshold = 5
+    $c9bQuery = "(Status:500 OR Status:403) AND (URI_Stream:*api* OR URI_Stream:*LookUp* OR URI_Stream:*Service*) AND filebeat_log_file_path:*inetpub*"
+    $c9bAgg = $null
+    try { $c9bAgg = mcp__OP-GL__aggregate_logs -streamId $prodStreamId -query $c9bQuery -rangeSeconds 3600 } catch {}
+    $c9bCount = [long](_Safe-AggCount $c9bAgg)
+    if ($c9bCount -eq 0) {
+        $findings.Add((_New-Finding -ClassId 9 -Severity "LOGGED" -Title "Class 09b -- API Object Enumeration: Clean window" `
+            -Technique "T1083 -- File and Directory Discovery" `
+            -Summary "No erroring API/object-endpoint access in the last hour. IDOR / object-enumeration signals absent." `
+            -RawQuery $c9bQuery))
+    }
+    else {
+        $c9bRows = @()
+        try { $c9bRows = _Safe-Results (mcp__OP-GL__search_logs_relative -streamId $prodStreamId -query $c9bQuery -rangeSeconds 3600 -fields $script:IIS_FIELDS -limit 60) } catch {}
+        $c9bByIp = @{}
+        foreach ($row in $c9bRows) {
+            $ip = if ($row.Client_ip) { $row.Client_ip } else { "-" }
+            if ($ip -eq "-") { continue }
+            $uri = if ($row.URI_Stream) { $row.URI_Stream } else { "/" }
+            if (-not $c9bByIp.ContainsKey($ip)) {
+                $c9bByIp[$ip] = @{
+                    uris = [System.Collections.Generic.HashSet[string]]::new()
+                    host = $(if ($row.Host) { $row.Host } else { "-" })
+                    ts   = $(if ($row.timestamp) { $row.timestamp } else { [datetime]::UtcNow.ToString('o') })
+                }
+            }
+            [void]$c9bByIp[$ip].uris.Add($uri)
+        }
+        $c9bAny = $false
+        foreach ($ip in $c9bByIp.Keys) {
+            $distinct = $c9bByIp[$ip].uris.Count
+            if ($distinct -lt $c9bThreshold) { continue }
+            $c9bAny = $true
+            $f = _New-Finding -ClassId 9 -Severity "REVIEW" `
+                -Title "Class 09b -- API Object Enumeration: $ip hit $distinct distinct API endpoints (500/403)" `
+                -Technique "T1083 -- File and Directory Discovery" `
+                -Summary "IP $ip received HTTP 500/403 across $distinct distinct object-scoped API endpoints in 1 hour (threshold $c9bThreshold). Consistent with object/ID (IDOR) enumeration -- probing access to objects that may not belong to the caller. $c9bCount total erroring API requests in window." `
+                -AnchorIp $ip -AnchorHost $c9bByIp[$ip].host -AnchorTime $c9bByIp[$ip].ts `
+                -RawQuery $c9bQuery `
+                -Investigate "Client_ip:$ip AND (Status:500 OR Status:403) AND (URI_Stream:*api* OR URI_Stream:*LookUp*)" `
+                -GraylogLink (_New-GraylogLink "Client_ip:$ip AND (Status:500 OR Status:403)" $prodStreamId)
+            $f = _Apply-AllowList -Finding $f -Config $Config
+            $findings.Add($f)
+        }
+        if (-not $c9bAny) {
+            $findings.Add((_New-Finding -ClassId 9 -Severity "LOGGED" -Title "Class 09b -- API Object Enumeration: below threshold" `
+                -Technique "T1083 -- File and Directory Discovery" `
+                -Summary "$c9bCount erroring API requests in 1h but no single IP hit >= $c9bThreshold distinct endpoints. No IDOR enumeration pattern." `
+                -RawQuery $c9bQuery))
+        }
+    }
+
+    # ------------------------------------------------------------------
     # CLASS 10 -- Scanner / Automation UA (T1595.001)
     # ------------------------------------------------------------------
     Write-Verbose "[LOCK] Class 10 -- Scanner UA"
@@ -747,7 +808,14 @@ function Invoke-LockScan {
     # Query in OR-groups of <=3 (validated safe) and combine counts + rows.
     # No leading slash: '*/x*' makes Graylog's wildcard match ~all traffic (846k);
     # '*x*' is correctly selective (validated: 12/17/27/6/197/131/0 hits/24h).
-    $c11Patterns = @('*wp-admin*','*wp-login*','*phpinfo*','*.git*','*.env*','*actuator*','*manager/html*')
+    # NOTE: '/' is a Lucene REGEX delimiter. Two unescaped '/' in one OR-group span a
+    # regex across terms and match broadly (false positives on legit pages). ALL slashes
+    # MUST be escaped as '\/' (literal). Each pattern validated SELECTIVE via REST 2026-06-11.
+    $c11Patterns = @(
+        '*wp-admin*','*wp-login*','*phpinfo*','*.git*','*.env*','*actuator*','*manager\/html*',
+        # infra / admin-API probe paths (24h: nacos=6 cmdb=2 solr=2 xmlrpc=180 jenkins=9 struts=2 phpmyadmin=6; mgmt\/tm, v1\/agent=0)
+        '*nacos*','*mgmt\/tm*','*cmdb*','*v1\/agent*','*solr*','*xmlrpc*','*jenkins*','*struts*','*phpmyadmin*','*.svn*'
+    )
     $c11Count = 0
     $c11Rows  = @()
     $c11QueryParts = @()
