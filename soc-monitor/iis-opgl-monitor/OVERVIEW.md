@@ -25,7 +25,7 @@ corroborated across multiple independent security systems.
    │            URL and host seen before. Anything NEW is flagged from  │
    │            its first appearance (no blind learning period)         │
    ├─────────────────────────────────────────────────────────────────┤
-   │ 3. CHECK   Run 17 attack-pattern detections: SQL injection, XSS,  │
+   │ 3. CHECK   Run 18 attack-pattern detections: SQL injection, XSS,  │
    │            remote-code-exec, path traversal, SSRF, web shells,     │
    │            brute-force / credential stuffing, enumeration,         │
    │            scanners, CVE/CMS probing, protocol abuse, data         │
@@ -68,7 +68,8 @@ Every finding climbs a four-step ladder — an alert fires **only at the top**:
 
 - **First-occurrence net:** any never-before-seen IP/user/URL is reviewed from its
   very first request — there is no "warm-up" window where new attackers slip by.
-- **17 behavioural detections** plus structural-anomaly and catch-all classes.
+- **18 behavioural detections** (including CVE / admin-API probing and API-object
+  / IDOR enumeration) plus structural-anomaly and catch-all classes.
 - **Daily AI completeness sweep:** once a day, Claude Opus reviews the day's most
   unusual traffic to catch subtle, slow, or novel attacks that fixed rules miss.
 
