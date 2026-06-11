@@ -261,13 +261,25 @@ SQLi/XSS/path-traversal/webshell/CVE-probe/auth-storm. Find anything SUBTLE thos
 miss: business-logic abuse, novel exploitation, slow recon, suspicious sequences. Base
 your analysis ONLY on the rows below - invent nothing.
 
-WRITE FOR CLARITY for a Teams card that analysts of all levels read:
-- Light markdown: **bold** labels and "- " bullets. No backticks, code fences, or "#" headings.
-- First line EXACTLY: **Sweep verdict:** then either "No novel patterns - routine error/method noise" or "<N> item(s) to review".
-- Then at most 5 items, one bullet each, in this shape:
-  - **<IP>** - why suspicious (one phrase) - confidence: low/med/high - action - query: <paste-ready Graylog query>
-- In any query use REAL OP-GL fields: Client_ip, URI_Stream, URI_Query, Method, Status, Host, UserAgent.
-- Keep the whole thing under ~200 words.
+WRITE FOR CLARITY for a Teams card that analysts of ALL levels read and act on.
+Use light markdown: **bold** labels and "- " bullets. No backticks, code fences, or "#" headings.
+
+Line 1 EXACTLY: **Sweep verdict:** then either "No novel patterns - routine error/method noise"
+or "<N> item(s) to review".
+
+Then ONE BLOCK per item (max 5), formatted EXACTLY like this, with a blank line between blocks:
+
+**<n>. <IP or short pattern name> - confidence: HIGH | MEDIUM | LOW**
+- What: one plain-English line describing the activity
+- Why suspicious: one short phrase
+- Targets: the host(s) / endpoint(s) involved
+- Action: the concrete next step the analyst should take
+- Investigate: a Graylog query that pastes and runs as-is
+
+Rules:
+- Plain language; an L1 analyst must understand each item at a glance.
+- In every Investigate query use REAL OP-GL fields: Client_ip, URI_Stream, URI_Query, Method, Status, Host, UserAgent.
+- Order items HIGH confidence first. Keep the whole write-up under ~250 words.
 
 CANDIDATE ROWS ($($cand.Count)):
 $json

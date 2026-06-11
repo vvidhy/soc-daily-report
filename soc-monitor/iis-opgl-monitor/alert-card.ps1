@@ -94,11 +94,17 @@ function Build-SweepCardEnvelope {
         [string] $GraylogLink
     )
     $txt = if ($ReportText.Length -gt 6000) { $ReportText.Substring(0,6000) + "`r`n... (truncated; see full report file)" } else { $ReportText }
+    # Lift the "Sweep verdict:" line into a prominent banner; item blocks render below.
+    $verdict = ''
+    $m = [regex]::Match($txt, '(?im)^\s*\*\*Sweep verdict:\*\*\s*(.+?)\s*$')
+    if ($m.Success) { $verdict = $m.Groups[1].Value.Trim(); $txt = $txt.Remove($m.Index, $m.Length).Trim() }
+    $vColor = if ($verdict -match '(?i)no novel|clean|routine|no candidate') { 'Good' } else { 'Warning' }
 
     $body = New-Object System.Collections.Generic.List[object]
     $body.Add(@{ type='TextBlock'; size='Large'; weight='Bolder'; color='Accent'; wrap=$true; text='IIS OP-GL - Daily completeness sweep' })
-    $body.Add(@{ type='TextBlock'; isSubtle=$true; wrap=$true; text=("Tier 3 - opus - ADVISORY - last {0}h - {1}" -f $WindowHours, $GeneratedUtc) })
-    $body.Add(@{ type='Container'; style='emphasis'; separator=$true; items=@(@{ type='TextBlock'; wrap=$true; text=$txt }) })
+    $body.Add(@{ type='TextBlock'; isSubtle=$true; spacing='None'; wrap=$true; text=("Tier 3 - opus - ADVISORY - last {0}h - {1}" -f $WindowHours, $GeneratedUtc) })
+    if ($verdict) { $body.Add(@{ type='TextBlock'; weight='Bolder'; size='Medium'; color=$vColor; spacing='Medium'; wrap=$true; text=("Verdict: {0}" -f $verdict) }) }
+    if ($txt)     { $body.Add(@{ type='Container'; style='emphasis'; separator=$true; items=@(@{ type='TextBlock'; wrap=$true; text=$txt }) }) }
     $body.Add(@{ type='TextBlock'; isSubtle=$true; wrap=$true; text='Advisory only - not a HIGH alert; AI hunches are never auto-escalated.' })
 
     $actions = New-Object System.Collections.Generic.List[object]
