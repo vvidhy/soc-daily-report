@@ -58,11 +58,45 @@ for ($i=1; $i -lt $rank.Count; $i++) {
         for ($j=0; $j -lt $i; $j++) { if ($buckets[$rank[$j]].ContainsKey($k)) { $buckets[$rank[$i]].Remove($k); break } }
     }
 }
-# Serious tiers (Critical/High) -> itemised; noisy tiers (Moderate/Low) -> grouped by type.
-function _Items($h,$cap){ @($h.Values | ForEach-Object { @{ ip=[string]$_.ip; host=[string]$_.host; what=(_Label $_.class) } } | Select-Object -First $cap) }
-function _Cats($h,$cap){ @($h.Values | Group-Object class | ForEach-Object {
-        @{ name=(_Label $_.Name); count=$_.Count; ip=@($_.Group | ForEach-Object { $_.ip } | Where-Object { $_ -and $_ -ne '-' } | Select-Object -First 1) }
-    } | Sort-Object { -$_.count } | Select-Object -First $cap) }
+# Per-class recommended action + per-tier "why" so every finding justifies its tier
+# with the key fields (Finding / MITRE / Why / Action).
+$actions = @{
+    1='Review DB/app 500s; block source if injection confirmed.'
+    2='Inspect POST payload; verify output encoding; block if malicious.'
+    3='Check the slow endpoint for command injection; block if anomalous.'
+    4='Confirm no file was served; block source; patch traversal.'
+    5='Confirm no internal/metadata host was reached; block source.'
+    6='Inspect the payload (exploit attempt); patch component; block source.'
+    7='Scan web root for a dropped file; block source; isolate host if confirmed.'
+    8='Block source; if a 200 followed, force password reset + verify MFA.'
+    9='Verify object-level authorization; block source; review API authz.'
+    10='Block scanner IP/UA; confirm WAF coverage.'
+    11='Confirm the path is NOT exposed (no 200); block source; patch component.'
+    12='Confirm method handling/limits; block source.'
+    13='Review outbound volume vs baseline; block if exfiltration.'
+    14='Investigate the periodic callback; block the C2 IP.'
+    15='Review the newly-seen source; baseline if legitimate, else block.'
+    16='Decode/inspect the payload; block source.'
+    17='Analyst review of the flagged pattern.'
+}
+function _Act($c){ $i=[int]$c; if($actions.ContainsKey($i)){$actions[$i]}else{'Analyst review.'} }
+function _Why($tier,$r){
+    switch($tier){
+        'CRITICAL' { $cc=[string]$r.corr; if($cc){ "Corroborated by another system - $cc" } else { "Corroborated across 2+ independent systems" } }
+        'HIGH'     { "Multiple detection signals on this one source" }
+        'MODERATE' { "New/unbaselined source or a rate threshold was exceeded" }
+        default    { "Probe recorded; it did not succeed (e.g. 404/302)" }
+    }
+}
+# strip the 'Class NN -- Label:' prefix so the finding line isn't redundant with the class label
+function _Finding($r){ ([regex]::Replace([string]$r.title, '^Class\s+\S+\s*--\s*[^:]+:\s*','')).Trim() }
+function _Items($tier,$h,$cap){
+    $all = @($h.Values)
+    $shown = @($all | Select-Object -First $cap | ForEach-Object {
+        @{ ip=[string]$_.ip; host=[string]$_.host; what=(_Label $_.class); finding=(_Finding $_); mitre=[string]$_.technique; why=(_Why $tier $_); action=(_Act $_.class) }
+    })
+    @{ items=$shown; total=$all.Count }
+}
 
 $dateDisp = try { [datetime]::ParseExact($Date,'yyyyMMdd',$null).ToString('yyyy-MM-dd') } catch { $Date }
 $glink = 'https://siem.secureocp.com/search?q=' + [Uri]::EscapeDataString('filebeat_log_file_path:*inetpub*') +
@@ -71,10 +105,10 @@ $glink = 'https://siem.secureocp.com/search?q=' + [Uri]::EscapeDataString('fileb
 $digest = @{
     date     = $dateDisp
     counts   = @{ CRITICAL=@($buckets.CRITICAL.Keys).Count; HIGH=@($buckets.HIGH.Keys).Count; MODERATE=@($buckets.MODERATE.Keys).Count; LOW=@($buckets.LOW.Keys).Count }
-    critical = (_Items $buckets.CRITICAL 8)
-    high     = (_Items $buckets.HIGH 8)
-    moderate = (_Cats  $buckets.MODERATE 8)
-    low      = (_Cats  $buckets.LOW 8)
+    critical = (_Items 'CRITICAL' $buckets.CRITICAL 10)
+    high     = (_Items 'HIGH'     $buckets.HIGH     10)
+    moderate = (_Items 'MODERATE' $buckets.MODERATE 6)
+    low      = (_Items 'LOW'      $buckets.LOW      5)
     graylog_link = $glink
 }
 Write-Host ("Digest {0}: CRITICAL={1} HIGH={2} MODERATE={3} LOW={4}" -f $dateDisp,$digest.counts.CRITICAL,$digest.counts.HIGH,$digest.counts.MODERATE,$digest.counts.LOW)

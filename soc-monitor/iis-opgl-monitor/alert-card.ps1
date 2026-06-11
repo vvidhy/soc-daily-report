@@ -155,30 +155,29 @@ function Build-DigestCardEnvelope {
         (_Tile $nLow  'LOW'      'Good')
     ) })
 
+    # Each finding as a compact block: "IP - what" + Finding + MITRE/Why + Action.
+    # Same shape for every tier; the Why line is what justifies the tier.
     foreach ($grp in @(
-        @{ key='critical'; label='Critical - corroborated across systems'; col='Attention' },
-        @{ key='high';     label='High - multiple signals on one source';  col='Warning' }
+        @{ key='critical'; label='CRITICAL - corroborated across systems'; col='Attention' },
+        @{ key='high';     label='HIGH - multiple signals on one source';  col='Warning' },
+        @{ key='moderate'; label='MODERATE - new entity / threshold (under review)'; col='Accent' },
+        @{ key='low';      label='LOW - probes that did not succeed';      col='Good' }
     )) {
-        $items = @($Digest[$grp.key])
-        if ($items.Count -gt 0) {
-            $body.Add(@{ type='TextBlock'; weight='Bolder'; size='Medium'; color=$grp.col; spacing='Medium'; separator=$true; wrap=$true; text=$grp.label })
-            foreach ($it in $items) {
-                $h = if ($it.host -and $it.host -ne '-') { " ($($it.host))" } else { '' }
-                $body.Add(@{ type='TextBlock'; wrap=$true; spacing='None'; text=("- **{0}** - {1}{2}" -f $it.ip, $it.what, $h) })
-            }
+        $tier  = $Digest[$grp.key]
+        $items = @($tier.items)
+        if ($items.Count -eq 0) { continue }
+        $body.Add(@{ type='TextBlock'; weight='Bolder'; size='Medium'; color=$grp.col; spacing='Medium'; separator=$true; wrap=$true; text=$grp.label })
+        foreach ($it in $items) {
+            $hostSuffix = if ($it.host -and $it.host -ne '-') { "  ($($it.host))" } else { '' }
+            $line = New-Object System.Collections.Generic.List[object]
+            $line.Add(@{ type='TextBlock'; wrap=$true; weight='Bolder'; spacing='None'; text=("{0}  -  {1}{2}" -f $it.ip, $it.what, $hostSuffix) })
+            if ($it.finding) { $line.Add(@{ type='TextBlock'; wrap=$true; spacing='None'; isSubtle=$true; text=[string]$it.finding }) }
+            $line.Add(@{ type='TextBlock'; wrap=$true; spacing='None'; isSubtle=$true; text=("MITRE: {0}   |   Why: {1}" -f $it.mitre, $it.why) })
+            $line.Add(@{ type='TextBlock'; wrap=$true; spacing='None'; text=("Action: {0}" -f $it.action) })
+            $body.Add(@{ type='Container'; spacing='Small'; style='emphasis'; items=$line.ToArray() })
         }
-    }
-    foreach ($grp in @(
-        @{ key='moderate'; label='Moderate - under review (by type)'; },
-        @{ key='low';      label='Low - probes, no success (by type)'; }
-    )) {
-        $cats = @($Digest[$grp.key])
-        if ($cats.Count -gt 0) {
-            $body.Add(@{ type='TextBlock'; weight='Bolder'; spacing='Medium'; separator=$true; wrap=$true; text=$grp.label })
-            foreach ($ct in $cats) {
-                $eg = if ($ct.ip) { "  (e.g. $($ct.ip))" } else { '' }
-                $body.Add(@{ type='TextBlock'; wrap=$true; spacing='None'; isSubtle=$true; text=("- {0}: **{1}**{2}" -f $ct.name, $ct.count, $eg) })
-            }
+        if ([int]$tier.total -gt $items.Count) {
+            $body.Add(@{ type='TextBlock'; wrap=$true; spacing='Small'; isSubtle=$true; text=("+ {0} more - see Open in Graylog" -f ([int]$tier.total - $items.Count)) })
         }
     }
     $body.Add(@{ type='TextBlock'; isSubtle=$true; spacing='Medium'; separator=$true; wrap=$true; text='Detection runs every 30 min (0 AI tokens); CRITICAL/HIGH (corroborated) are also alerted live. Tiers - CRITICAL: corroborated across >=2 systems; HIGH: multiple signals on one source; MODERATE: new entity / threshold; LOW: recorded probe that did not succeed.' })

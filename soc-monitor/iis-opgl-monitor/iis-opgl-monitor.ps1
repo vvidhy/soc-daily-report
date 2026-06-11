@@ -192,6 +192,7 @@ try {
             ip        = [string]$df.anchor_ip
             host      = [string]$df.anchor_host
             title     = [string]$df.title
+            corr      = ((@($df.corroboration_sources)) -join '; ')   # the "why" for CRITICAL (cross-stream evidence)
         } | ConvertTo-Json -Compress) | Add-Content -Path $digestFile -Encoding utf8
     }
 } catch { Write-IISLog WARN ("digest accumulation failed: {0}" -f $_.Exception.Message) }
