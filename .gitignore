@@ -57,3 +57,22 @@ Filebeat_azureeventhib.txt
 GRAYLOG.txt
 pfesicandgratuityforms.zip
 iocs-*.json
+
+# Daily Hunt — credentials & tokens (NEVER commit)
+**/.mcp.json
+**/mcp-*.json
+**/.ti-keys.json
+
+# Daily Hunt — runtime state & reports (regenerated each run)
+New\ Daily\ hunt/reports-noskill/
+New\ Daily\ hunt/reports/
+New\ Daily\ hunt/reports-live/
+New\ Daily\ hunt/logs-noskill/
+New\ Daily\ hunt/logs/
+New\ Daily\ hunt/sftp_findings*.json
+New\ Daily\ hunt/streams.json
+New\ Daily\ hunt/inputs.json
+New\ Daily\ hunt/infra-streams.json
+New\ Daily\ hunt/.claude/
+New\ Daily\ hunt/_archived-graylog-rest-recon/
+*.json.bak-*

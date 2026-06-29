@@ -1,0 +1,84 @@
+﻿DEPTH CATCHUP - run ONLY the 6 modules that were skipped in today's main depth pass.
+
+The modules that already ran today (DO NOT re-run these):
+  ioc-ip-reputation, dcsync-replication, ransomware-impact, beaconing-c2,
+  password-spray-origin, credential-stuffing-pivot, ad-recon-discovery, privilege-escalation
+
+MODULES TO RUN (these 6 only):
+  1. webshell-upload-exec      (depth-modules\webshell-upload-exec.json)
+  2. lateral-movement          (depth-modules\lateral-movement.json)
+  3. data-exfil-volumetric     (depth-modules\data-exfil-volumetric.json)
+  4. data-staging-collection   (depth-modules\data-staging-collection.json)
+  5. service-install-persistence (depth-modules\service-install-persistence.json)
+  6. impossible-travel         (depth-modules\impossible-travel.json)
+
+RULE 0 - DO NO HARM:
+- Never edit daily-latest.md, depth-findings.json, or any breadth output file.
+- Output file is reports-noskill\depth-catchup.json (separate from depth-findings.json).
+- ADD-ON ONLY: may add new findings. Never remove or downgrade.
+
+MODEL: sonnet. Skill tool disabled. Call mcp__AZ-GL__ / PROD-GL / DEV-GL / OP-GL directly.
+
+STEP 1 - CONTEXT (do not modify):
+- Read reports-noskill\daily-latest.md to see what was already found today.
+- Read reports-noskill\depth-findings.json to see what depth already surfaced.
+- Use as context only — do not repeat any finding already in those files.
+
+STEP 2 - RUN THE 6 MODULES:
+- Load each JSON file from depth-modules\ for the 6 modules listed above.
+- For each module, run a full 24h hunt across ALL GLs in applies_to_gl.
+- Use trigger.from_breadth as the detection pattern.
+- Run the module's method steps in order. Exact-count targeted queries.
+- Honor telemetry_gap_behavior: absent data = known-gap, NEVER clean.
+- TI ENRICHMENT: for any finding whose entity is an EXTERNAL IP (non-RFC1918, non-allowlisted),
+  before writing it, run:
+    powershell -NoProfile -ExecutionPolicy Bypass -File D:\Vidhya\New Daily hunt\ti-enrich.ps1 -Ip <entity>
+  Fold the result into the finding:
+    evidence += "VT <malicious>/<total> malicious, AbuseIPDB <score>%, <as_owner>/<country>"
+    detail  += verdict reasoning
+  Escalate to HIGH minimum when verdict=MALICIOUS (VT malicious>=5 OR AbuseIPDB>=75).
+  Escalate to CRITICAL when attack also succeeded (HTTP 200 / auth success).
+  The helper no-ops if .ti-keys.json is absent — safe to call every run.
+  SKIP: RFC1918 IPs, internal hostnames, loopback. Only IPs tied to confirmed attack signals.
+- If nothing found for a module, skip (no entry in output).
+
+STEP 2.5 - COVERAGE LOG (MANDATORY):
+Print one [COVERAGE] line per module to stdout (appears in log):
+  [COVERAGE] <module-name> | GLs: <gl1,gl2,...> | queries_run: <N> | found: <N> | status: ran
+  [COVERAGE] <module-name> | status: skipped | reason: <one-line reason>
+
+All 6 lines required.
+
+STEP 3 - WRITE (MANDATORY — final action):
+YOUR FINAL ACTION MUST BE calling the Write tool to create reports-noskill\depth-catchup.json.
+Do NOT output findings as text. Text output is discarded. Only the file matters.
+Write a raw JSON array (no markdown, no code fences). Empty array [] if nothing found.
+
+  The "detail" field = narrative why it matters / how detected (NO raw log lines here)
+  The "evidence" field = 2-5 VERBATIM raw log lines copy-pasted from the Graylog message field exactly as returned by search_logs_relative (each on its own line, prefixed with its timestamp). Do NOT paraphrase or summarize. After the raw lines, add a one-line count summary.
+  Example evidence: "09:29:25Z EventID 1116: Microsoft Defender Antivirus has detected malware... Name: Backdoor:ASP/Webshell!MSR Severity:Severe Path: file:_\\\\server\\share\\test\\shell.aspx Detection Source: Real-Time Protection | 09:17:12Z 4688: CP7z.exe a '...chunk00.7z' '...EDR\\Data'"
+
+  Full JSON structure (ALL fields required):
+  [
+    {
+      "sev": "HIGH",
+      "env": "OP-GL",
+      "surface": "iis",
+      "source": "web",
+      "entity": "1.2.3.4",
+      "mitre": "T1505.003",
+      "tactic": "TA0003 Persistence",
+      "killchain": "Installation",
+      "finding": "one-line title",
+      "detail": "narrative why it matters / how detected",
+      "evidence": "timestamped Graylog log lines",
+      "action": "paste-ready next step",
+      "query": "Graylog query",
+      "verdict": "TP",
+      "confidence": 4,
+      "change": "added",
+      "links_breadth_finding": ""
+    }
+  ]
+
+DONE WHEN: all 6 modules ran, coverage lines printed, depth-catchup.json written.

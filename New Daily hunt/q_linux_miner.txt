@@ -1,0 +1,1 @@
+message:("xmrig" OR "kdevtmpfsi" OR "kinsing" OR "sysrv" OR "minerd")

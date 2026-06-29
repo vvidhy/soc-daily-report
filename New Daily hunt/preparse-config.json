@@ -1,0 +1,101 @@
+{
+  "rdp": {
+    "failure_event_id": "4625",
+    "interactive_logon_query": "winlogbeat_winlog_event_id:4624 AND winlogbeat_event_data_LogonType:10",
+    "log_clear_query": "winlogbeat_winlog_event_id:(1102 OR 104)",
+    "new_account_query": "winlogbeat_winlog_event_id:4720",
+    "admin_group_add_query": "winlogbeat_winlog_event_id:(4728 OR 4732 OR 4756)",
+    "defender_query": "winlogbeat_winlog_event_id:(1116 OR 1117 OR 1118 OR 1119 OR 5001 OR 5007 OR 5010 OR 5012)",
+    "failure_min_count": 3
+  },
+  "linux": {
+    "ssh_failure_phrases": [
+      "Failed password",
+      "Invalid user",
+      "authentication failure",
+      "Connection closed by invalid user",
+      "Failed publickey"
+    ],
+    "ssh_failure_min_count": 10,
+    "sudo_phrases": [
+      "sudo:",
+      "su:"
+    ],
+    "threat_tokens": [
+      "xmrig",
+      "kdevtmpfsi",
+      "kinsing",
+      "sysrv",
+      "masscan",
+      "/.x",
+      "curl|bash",
+      "wget|bash",
+      "chmod 777",
+      "base64 -d",
+      "/tmp/.",
+      "mkfifo",
+      "nc -e",
+      "/dev/tcp",
+      "python -c"
+    ]
+  },
+  "azure": {
+    "mfa_failure_codes": [
+      "50074",
+      "50076",
+      "50079",
+      "50158",
+      "500121",
+      "500341",
+      "53003",
+      "70011"
+    ],
+    "noise_codes_to_exclude": [
+      "70043",
+      "70044",
+      "50173",
+      "50140"
+    ],
+    "risk_level_high": "high",
+    "cato_egress_ips": [
+      "140.82.202.196",
+      "199.27.40.187",
+      "123.253.153.138"
+    ]
+  },
+  "sftp": {
+    "blocked_phrase": "address is blocked",
+    "tls_probe_phrases": [
+      "version too low",
+      "SSL accept error",
+      "wrong version number",
+      "Key exchange failed"
+    ],
+    "auth_failure_phrases": [
+      "Authentication failed",
+      "Login failed",
+      "Password incorrect",
+      "publickey authentication failed"
+    ],
+    "large_transfer_phrase": "Successfully stored file",
+    "large_transfer_min_mb": 500,
+    "blocked_source_threshold": 300
+  },
+  "allowlist": {
+    "nessus_ips": [
+      "10.101.100.160",
+      "10.150.116.93",
+      "10.250.100.77",
+      "10.220.100.199"
+    ],
+    "cato_ips": [
+      "140.82.202.196",
+      "199.27.40.187",
+      "123.253.153.138"
+    ],
+    "zscaler_prefixes": [
+      "136.226.",
+      "165.225."
+    ]
+  }
+}

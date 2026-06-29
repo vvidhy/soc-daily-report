@@ -1,0 +1,1 @@
+message:("union select" OR "xp_cmdshell" OR "information_schema" OR "waitfor delay")

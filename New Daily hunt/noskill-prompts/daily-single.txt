@@ -1,0 +1,593 @@
+﻿Run the DAILY SOC 24-hour security hunt across all 4 Graylogs. Skill tool disabled. No subagents — call mcp__AZ-GL__ / mcp__PROD-GL__ / mcp__DEV-GL__ / mcp__OP-GL__ tools directly.
+
+MISSION: You are a senior SOC analyst producing the daily morning briefing for Casepoint. Find EVERYTHING that happened in the past 24 hours that matters for security. Be thorough AND efficient — every query must produce a decision. Do not re-query a field you already have data for. Do not explore without a hypothesis.
+
+FRAMEWORK: LOCK — Learn, Observe, Check, Keep.
+L = LEARN    Pre-flight: load stream IDs, check priority surfaces from prior run.
+O = OBSERVE  Run broad aggregations. Read distributions as an analyst. Find outliers, spikes, first-seen entities, off-hours activity. aggregate_logs is cheap — use freely, top 100-200 results.
+C = CHECK    Drill every confirmed CRITICAL/HIGH/MEDIUM anomaly with search_logs_relative (max 10 rows per drill — enough for evidence). Drill ALL confirmed anomalies — never skip one. LOW/REVIEW: aggregate evidence is sufficient, no drill needed.
+K = KEEP     Document every finding with evidence, MITRE, confidence, action. Write findings-json per surface immediately after completing it so output is preserved if the session is interrupted.
+
+TOKEN STRATEGY (efficiency-first, coverage-mandatory):
+aggregate_logs   → top 50 per aggregation is sufficient for anomaly detection. Use for OBSERVE phase only.
+search_logs_relative → ONLY after aggregate confirms something suspicious, OR for mandatory single-event checks. Max 10 rows per drill — enough for evidence. Never drill a clean aggregate.
+ONE-QUERY RULE: one query = one decision. Do NOT re-aggregate a field you already queried. CLEAN verdict requires BOTH named-field aggregate AND raw message sweep (rule g) to return nothing suspicious — only then emit CLEAN and move on. A clean named-field aggregate alone is NOT a clean verdict.
+ONE-TRY RULE: if an MCP call fails or returns 0 unexpectedly, try the REST fallback ONCE. If that also fails, add to coverage-gaps.json and move on. Never retry the same query a third time.
+Write findings-json blocks per surface immediately after completing it — do not batch at the end.
+FULL-COVERAGE RULE: you MUST assess all 8 surfaces across all 4 GLs in THIS run. Do NOT defer surfaces to coverage-gaps.json unless MCP+REST both genuinely failed. coverage-gaps.json is for outages only.
+CONTENT-FIRST IS NON-NEGOTIABLE: IIS aggregates URI_Query/URI_Stream content (Status-only pass = FAILED hunt); Azure runs application-access + audit-operations + risk-detections (never just error-code distribution); Windows hunts process/command-line + successful-logon content (never just 4625 counts). These are non-negotiable regardless of token cost — but achieve them efficiently: 1 content aggregate per surface, not 5.
+
+MANDATORY SURFACE ROSTER — every one of these MUST be assessed THIS run (a CLEAN surface still gets a CLEAN finding; a surface with NO finding at all = SKIPPED = FAILED run): (1) IIS + APP [iis/app], (2) Windows + RDP [rdp], (3) Azure / Entra [azure], (4) Linux [linux], (5) SFTP [sftp], (6) Network / Firewall [firewall|switch|lb], (7) Database [db], (8) EDR + MFA + Virtualization + Hardware [edr|mfa|virt|hw]. "Azure and IIS are the PRIMARY deep surfaces" means they get the MOST drill-depth — it does NOT license shortening or skipping the rest. ORDER OF OPERATIONS: FIRST complete the full roster's STEP-1 content + mandatory single-event checks across all 4 GLs (breadth), THEN pour any remaining depth into Azure + IIS. Never spend so long on Azure/IIS that Windows / Linux / SFTP / Network / DB / EDR / MFA / Virt / HW go untouched — a run that nails Azure+IIS but misses another surface is a FAILED run.
+
+PRE-FLIGHT (run FIRST, zero extra queries):
+(1) Read reports-noskill\coverage-gaps.json — prioritize any listed surfaces before standard order.
+(2) Read streams.json and infra-streams.json ONCE for all stream IDs (refreshed LIVE 2026-06-14 - IDs are current). NEVER call list_streams. INPUT FALLBACK: inputs.json caches per-GL Graylog INPUT ids (title->id/type/port). If a stream filter returns 0 rows where you EXPECT data, that is broken stream-ROUTING, NOT stale IDs (the IDs are verified current) - do NOT report the source clean and do NOT call it "stale streams.json". Instead re-query that source via gl2_source_input:<id> from inputs.json, or search all-messages with field filters, THEN assess.
+
+HARD RULES:
+(a) rangeSeconds 86400 on ALL queries (24-hour window).
+(b) OBSERVE before CHECK — always aggregate first. Never start a surface with raw search.
+(c) MCP failure -> REST FALLBACK (do NOT send a reachable surface to stale): if an MCP tool call fails, retry it ONCE via MCP. If it still fails, the MCP wrapper is flaky but Graylog itself is almost certainly up (the MCP server is only a thin wrapper over the same REST API) -> FALL BACK to REST for that surface's queries using graylog-rest-query.ps1. Cortex-clean invocation: Write your Lucene query to a temp file first, then run it (the helper reads the token from .mcp.json and returns MCP-shaped JSON):
+   aggregate: powershell -NoProfile -ExecutionPolicy Bypass -File D:\Vidhya\New Daily hunt\graylog-rest-query.ps1 -GL <AZ-GL|PROD-GL|DEV-GL|OP-GL> -Mode aggregate -Field <field> -QueryFile <tmp> -StreamId <id> -RangeSeconds 86400 -Size 50   ->  {total_matched, messages_aggregated, truncated, top{}}
+   search:    powershell -NoProfile -ExecutionPolicy Bypass -File D:\Vidhya\New Daily hunt\graylog-rest-query.ps1 -GL <..> -Mode search -QueryFile <tmp> -StreamId <id> -RangeSeconds 86400 -Limit 20 -Fields "f1,f2"   ->  {total_results, messages[]}
+   Assess the surface from the REST output exactly as you would from MCP and emit normal findings. ONLY if the REST call ALSO fails (a genuine Graylog outage) do you add the surface to reports-noskill\coverage-gaps.json and emit sev=REVIEW finding="mcp-hung: <surface> - MCP and REST both failed; no assessment taken". A surface NEVER goes to coverage-gaps/stale while it is still reachable by REST.
+(d) MANDATORY single-event checks: certain events are CRITICAL/HIGH by definition regardless of volume. Run these as search_logs_relative — if they appear, emit finding immediately without waiting for aggregation.
+(e) NEVER emit a finding without evidence (actual counts, IPs, usernames, or raw log values from the data).
+(f) CRITICAL/HIGH findings: write alert-{surface}-{HHmmss}.json to reports-noskill\ immediately after confirming — before moving to next surface. One file per finding. Keys: sev env surface finding evidence mitre tactic killchain verdict confidence action detail correlation query investigate.
+(g) ALWAYS HUNT THE RAW message FIELD - parsed/named fields are incomplete on EVERY surface. Stream routing does NOT capture all logs into the stream and the extractors do NOT parse all content into named fields (proven: IIS Status null on PROD/AZ/DEV; SFTP/Rebex source = log-level tokens not host; Rebex auth lives only in message text; Azure prop/prob twins; Linux ssh fully unparsed). Named-field aggregation is a CONVENIENCE layer for volume only - it is NEVER proof of clean. On EVERY surface you MUST also run that surface's signatures against the raw message field, AND sweep NOT _exists_:<the-expected-key-field> to catch unparsed/unrouted events, BEFORE any clean verdict. A named-field zero (or a quiet parsed aggregation) is NOT clean until the raw message content for that signature has been searched and come back empty. When a parsed field and the message disagree, trust the message. ENRICHMENT-LOOKUP EXCEPTION: Origin_ip is a POPULATED Graylog lookup field (ASN/org/country, keyed off Client_ip) that carries attribution the raw message does NOT have - e.g. "Cloud Sigma (CS-101)/US", "HostUS (HOSTU-4)/US", "U.S. Securities & Exchange Commission (USEC-Z)/US" - and it is present even where W3C parsing fails (Status null). USE Origin_ip (plus Geo_Country and Geo_ip) for IP ATTRIBUTION: flag hosting/VPS/VPN/Tor/anonymizer ASNs (Cloud Sigma, HostUS, Servers.com, Linode, ServerPoint, etc.) hitting app/auth/login endpoints; identify the org behind a Client_ip; enforce geo-ACL via the /CC suffix. This is the ONE place a named field beats the message - "hunt the message" governs detection CONTENT (which survives a parse miss), NOT these enrichment lookups which ADD data the message lacks.
+(h) TI ENRICHMENT - reputation-check the attacker IP on EVERY surface (not just IIS): for ANY finding whose attacker is an EXTERNAL (non-RFC1918, non-allowlisted) IP tied to a confirmed attack signature - IIS injection/webshell in URI content; ESET exploitation-attempt or EsetIpBlacklist / CVE block; FortiGate inbound ALLOW to a sensitive port, IPS alert, or outbound C2 dstip; SFTP / DTC_Rebex brute-force source or success-from-external - run: powershell -NoProfile -ExecutionPolicy Bypass -File D:\Vidhya\New Daily hunt\ti-enrich.ps1 -Ip <attacker_ip>. Fold the VT/AbuseIPDB verdict + counts into the finding evidence and the reasoning into detail. ESCALATE to HIGH minimum (CRITICAL if the attack also succeeded - HTTP 200 / session accepted / auth success) when verdict=MALICIOUS (VT malicious>=5 OR AbuseIPDB>=75). External attack-tied IPs ONLY - never bulk-check every IP (free-tier 4/min). Helper no-ops if .ti-keys.json is absent, so it is safe every run.
+
+MITRE + KILL CHAIN (every finding, MANDATORY — never blank):
+tactic: TA-code + name e.g. "TA0001 Initial Access"
+mitre: T-code list e.g. "T1190, T1078"
+killchain: Reconnaissance | Weaponization | Delivery | Exploitation | Installation | C2 | Actions
+Chain escalation: if findings across surfaces show kill chain progression (Delivery on IIS → Exploitation on Linux → C2 on Firewall) → escalate all linked findings to CRITICAL, cross-reference full chain in each finding's correlation field.
+
+ENTITY PIVOT (after all sweeps, before final output):
+Same IP or username in 3+ surface findings → escalate all to HIGH minimum. Record entity + surface list in each finding's correlation field.
+
+ALLOW-LIST:
+Cato egress: 140.82.202.196 / 199.27.40.187 / 123.253.153.138 → cap MEDIUM, tag "Cato egress". Escalate if Cato IP performs data export, admin action, or lateral move.
+Nessus/Tenable: 10.102.100.199 / 10.101.100.160 / 10.250.100.77 / 10.220.100.199 → cap LOW, tag "sanctioned scanner". Escalate if scanner performs admin action or data export.
+
+GEO-ACL (apply to IIS, Azure, APP surfaces):
+Allowed: US+territories, Colombia, Ireland, Poland, UK, Singapore, Canada, Germany, Australia, Italy, Japan, HK, India, Romania, Mexico, Netherlands, Israel.
+UT Prod/UAT eCase = US+territories ONLY. EPA Prod PAL = worldwide (no flag).
+Access from outside applicable ACL = MEDIUM minimum. [T1078]
+
+====================================================================
+SURFACE 1: IIS + APP  (surface=iis / surface=app)
+====================================================================
+
+NOTE: ALL streams listed below are raw IIS W3C logs (inetpub path). There is NO separate "APP" category — every application stream is an IIS stream. Hunt web-attack signals AND application logic signals (A1-A13 below) on the SAME set of streams.
+
+IIS STREAMS (ALL GLs):
+OP-GL: IIS_PROD=69837caf557da7352164b45c, IIS_UAT=69840794557da7352164ff7c. Named fields reliable — use Client_ip, Status, URI_Stream directly.
+PROD-GL: IIS_Platform/Hybrid, IIS_PlatformCA, IIS_FOIA, IIS_Platform_vintasoft, IIS_PlatformPT, IIS_PlatformPT_vintasoft, IIS_OpexusPT, IIS_PROD_Canada_Opexus, IIS_BPMS, IIS_Exolution. Use stream IDs from infra-streams.json iis category. PARSER BLIND SPOT: named-field zero for Status and Client_ip is NOT proof of clean — always hunt the raw message field.
+AZ-GL: IIS_FOIA, IIS_Platformgov, IIS_CGCE_vintasoft, IIS_Exolution. Use stream IDs from infra-streams.json iis category. Named fields frequently null — hunt raw message field.
+DEV-GL IIS: not hunted here (covered by dev surface).
+
+-- IIS MANDATORY SINGLE-EVENT CHECKS (search_logs_relative, flag immediately if found) --
+
+M1. jndi: OR ${jndi: OR ${${lower: in any field → Log4Shell (T1190 CRITICAL)
+M2. Known webshell filenames in URI: c99.php r57.php wso.php b374k.php shell.php cmd.php upload.php phpspy.php FilesMan.php webshell.php sh.php backdoor.php → CRITICAL
+M3. 169.254.169.254 OR instance-data OR localhost: OR 127.0.0.1 in URI from external IP → SSRF (T1078 HIGH)
+M4. cmd= OR eval= OR exec= OR system= OR shell_exec= OR passthru= OR popen= OR proc_open= in URI query string → webshell command execution (HIGH)
+
+-- IIS HUNT ORDER (CRITICAL — DO NOT lead with status) --
+
+Status code is NOT the entry point. A request is suspicious because of WHAT it asked for (URI_Stream + URI_Query content), not because of its response code. Status is a CONFIRMATION layer applied AFTER content — it tells you whether the attack SUCCEEDED, never whether it happened. "All blocked 403/302" is NOT clean: a 403/404 on an injection string is a logged ATTACK ATTEMPT and must be reported (MEDIUM min); a 200 on the same string is a confirmed COMPROMISE (HIGH/CRITICAL). Hunt every run in this order, and check BOTH modes:
+  SUSPICIOUS = known-bad signatures (the ANALYTICAL LENS tokens below)
+  ANOMALY    = deviation from THIS site's own baseline (rare/first-seen paths, fuzzing, entropy, off-hours) — catches novel attacks no signature covers.
+
+PARSER NOTE: OP-GL parses URI_Query / URI_Stream as named fields → aggregate them directly. PROD/AZ/DEV-GL frequently NULL these fields → hunt URI content on the raw message field. Named-field zero is NOT proof of clean.
+DO NOT SKIP UNPARSED LOGS (if the logs are not filtered, hunt them anyway): on every IIS stream run a coverage sweep `NOT _exists_:Status` (and `NOT _exists_:URI_Stream`) to surface extractor-dropped / unfiltered events, then hunt those raw `message` bodies with the SAME STEP-1 signatures. A stream that returns zero on the parsed/filtered query is NOT clean until its unparsed raw traffic has also been swept. Never let a broken filter become a blind spot.
+
+STEP 1 — URI CONTENT  (PRIMARY — run FIRST, this is the detection layer):
+U1. Aggregate URI_Query top 100-200 (named field on OP-GL; raw message elsewhere) → read EVERY distinct query string against the ANALYTICAL LENS. SUSPICIOUS mode: any injection/attack token = flag. This is the single most important query of the IIS hunt — never skip it, never substitute status for it. MANDATORY even when pacing against the turn budget: if short on turns, cut confirmation DRILLS, never this URI-content aggregate. A Status-only IIS pass (e.g. querying Status:401 and calling it done) is a FAILED hunt — it misses every injection/webshell/traversal/SSRF that returned 200/302/403.
+U2. Aggregate URI_Stream (path) top 100-200 → webshell filenames, scanner paths, sensitive files (/.git /.env /web.config /server-status), admin/API paths, known-vuln paths. SUSPICIOUS mode against the lens.
+U3. URI ANOMALY mode (deviation, not signature):
+    - Rare paths: URI_Stream total count 1-15 = targeted, not crawl noise → novel path / possible backdoor
+    - First-seen: script-extension path (.php .asp .aspx .ashx .jsp .cfm .cgi) not in prior baseline
+    - Param fuzzing: one URI_Stream with many DISTINCT param names/values = parameter discovery
+    - High-entropy: long random-looking path or query segment = encoding/obfuscation or generated payload
+    - Sequential params: id=1,2,3 / document_id=100,101 / GUID walk = IDOR enumeration T1083
+    - Off-hours (23:00-05:00) script-extension access returning content
+
+STEP 2 — STATUS AS CONFIRMATION  (secondary — applied to the URIs STEP 1 flagged; sets severity, never gates detection):
+For EACH suspicious/anomalous URI from STEP 1, pull its status to grade it:
+    200/206 to an injection / webshell / traversal / SSRF URI = CONFIRMED EXPLOITATION → HIGH/CRITICAL
+    5xx cluster (>5 in 1h) from an IP that also sent injection patterns = attack causing server errors → HIGH
+    403/401/404/302 on an attack URI = ATTEMPTED-BUT-BLOCKED → still report MEDIUM (NEVER drop as "clean")
+Then read status DISTRIBUTION as its own anomaly: 401/403 spike=brute force T1110; 400 spike=scanner/malformed; 500 spike=exploitation errors; 200 spike single IP=enumeration success.
+
+STEP 3 — BEHAVIORAL / VOLUMETRIC ANOMALY  (independent of URI content — run alongside):
+B1. Top 100 source IPs by request count → single IP >5x next highest; high count + low success rate
+B2. HTTP method distribution → unexpected PUT/DELETE/TRACE/CONNECT/OPTIONS from external IP
+B3. Top 50 User-Agents → scanner UAs (sqlmap nikto nuclei masscan gobuster ffuf wfuzz dirbuster burpsuite acunetix python-requests curl-on-prod); empty-UA; identical-custom-UA across many IPs; same IP >3 UAs = cycling T1036
+B4. Response size → cs_bytes >100KB (large upload/exploit payload); sc_bytes >1MB on API/data endpoint = exfil T1048; sc_bytes <50 on script URI returning 200 = webshell command output
+B5. Auth endpoint (/login /auth /signin /token /oauth /sso) by source IP + 401/403 count → >20 failures single IP = brute force; failure then success same IP = compromise
+B6. Bulk data endpoint (/document /record /download /export /api/) by source IP → single IP >500 req or session sc_bytes >100MB = exfil T1048
+B7. Beaconing: same IP fixed-interval requests to same URI, low jitter = HTTP C2 T1071
+
+-- IIS ANALYTICAL LENS (the STEP 1 signature set — read every URI_Query / URI_Stream against these; drill any hit, status comes after per STEP 2) --
+
+Read each URI against these classes. When you see a suspicious pattern, drill it:
+
+OWASP A01 Broken Access Control: /admin/ /internal/ /api/admin/ returning 200 to non-admin; 403 then 200 same IP same URI within 10 min (auth bypass T1078); sequential numeric/GUID params (id=1,2,3 document_id=100,101 = IDOR T1083)
+OWASP A02 Cryptographic: HTTP not HTTPS on auth/data endpoints; token= password= key= in URI query string
+OWASP A03 Injection — read URI for these tokens (each as separate indicator):
+  SQL: ' OR 1=1 | UNION SELECT | '; DROP | xp_cmdshell | WAITFOR DELAY | exec(
+  XSS: <script | javascript: | onerror= | document.cookie | alert( | onload=
+  Command: /bin/bash | |whoami | net user | powershell -enc | cmd.exe /c | `id`
+  Traversal: ../ | ..%2F | %2e%2e | ..%5c | ....// | /etc/passwd | /etc/shadow | /windows/system32
+  LFI/RFI: php://filter | file:/// | /proc/ | /var/www
+  SSTI: {{7*7}} | ${7*7} | <%= | #{7*7}
+  Deserialization: rO0AB | O:8: | a:0:{
+  Log4Shell: jndi: | ${jndi: | ${${lower:
+OWASP A05 Misconfiguration: /.git/ /.env /.svn/ /backup/ /phpinfo.php /server-status /web.config; directory listing (200 + Index of in body); default credential paths
+OWASP A06 Outdated components: /struts2/ /log4j/ /spring/ /actuator/ (known vulnerable paths)
+OWASP A10 SSRF: url= redirect= target= dest= params containing internal IPs; X-Forwarded-Host or X-Host injection; cloud metadata IP in any field
+HTTP Smuggling: Transfer-Encoding chunked mismatch with Content-Length; 400 cluster from one IP with large content
+Webshell behavioral: POST to static resource (.jpg .png .gif) returning 200; URI previously 404ing now 200 (new file dropped); /.git /backup .bak .sql .zip in web root; large response (>50KB) from script file with 200
+UA cycling: same IP with >3 different User-Agents in 24h = evasion T1036
+GraphQL abuse: __schema | __type | introspection | "mutation{" | "query{" in URI/query = schema enumeration or GraphQL injection T1190
+API enumeration: rapid sequential version/endpoint probing from single IP — /v1/ /v2/ /v3/ /beta/ /internal/ /api/admin/ — = version & endpoint discovery T1590
+JWT in URI: eyJ Base64 token in query string (access_token= token= jwt= id_token= or bare eyJ...) = JWT leaked in GET = token leakage/replay T1552.001
+Cache poisoning: X-Forwarded-Host | X-Original-URL | X-Rewrite-URL | X-Host header reflected into a redirect/response (where logged) = unkeyed-input web cache poisoning T1557 (NOTE: IIS W3C logs headers only if cs(...) custom fields configured — hunt where present, else note as not-logged)
+
+EXPLOITATION CONFIRMATION (drill raw <=20 rows; HIGH minimum):
+HTTP 200 to URI that contained injection token = confirmed exploitation
+HTTP 5xx cluster >5 errors in 1h from IP that also sent injection patterns = attack causing server error
+Response >1MB to URL <100 chars from external IP = data exfiltration T1048.002
+TI ENRICHMENT (threat-intel reputation on the attacker IP): whenever an exploitation/injection token is confirmed in URI_Query or URI_Stream from an EXTERNAL (non-RFC1918, non-allowlisted) Client_ip, reputation-check that IP - run: powershell -NoProfile -ExecutionPolicy Bypass -File D:\Vidhya\New Daily hunt\ti-enrich.ps1 -Ip <client_ip> - then FOLD the result into the finding: VT/AbuseIPDB verdict + counts go in evidence (e.g. "VT 12/89 malicious, AbuseIPDB 100pct, DigitalOcean/US"), the reasoning in detail. ESCALATE to HIGH minimum when verdict=MALICIOUS (VT malicious>=5 OR AbuseIPDB>=75), and CRITICAL if that URI also returned 200 (confirmed exploitation from a known-bad IP). This is reputation ON TOP OF the Origin_ip ASN/org lookup. The helper no-ops if .ti-keys.json is absent, so it is safe to call every run. Only check IPs already tied to an attack signature - never bulk-check every IP (free-tier rate limit).
+
+-- APP OBSERVE (application logic signals from APP streams, same inetpub source) --
+
+A1. Auth failure by application user top 50 → >5 failures same user = credential attack T1110
+A2. Session source IP for authenticated users → same session/user from 2+ distinct IPs = session hijacking T1563
+A3. Bulk document/record access per session → >50 records or large sc_bytes from data endpoints in single session = T1213 (especially FOIA/case records)
+A4. Off-hours (22:00-06:00) access to case/document data by authenticated user → insider or compromised account
+A5. HTTP 5xx per user or IP top 50 → >20 app exceptions from one account = exploitation or fuzzing T1190
+A6. Admin or config change event from geo-ACL violating IP
+A7. Self-privilege modification: role change or permission grant by non-admin account → T1098
+A8. MTTFS stream (6130ce54d5307c39dba858d4): large clone or access failure spike → T1213.003
+A9. File upload events → unexpected directory or double extension (.php.jpg .asp.png) = webshell staging T1505
+A10. Impossible travel: same application username from 2 different countries within 2h → T1078 HIGH
+A11. Workflow bypass: authenticated user reaching a later workflow/state endpoint (approve/submit/finalize/export) with NO preceding step events (create/review) in the same session → business-logic abuse T1190 — HIGH for BPMS/FOIA/Opexus case workflows
+A12. Account takeover sequence: lockout or auth-failure burst for a user, THEN successful login from a DIFFERENT IP/country within the same window → attacker succeeded from new source T1078 HIGH
+A13. Webshell first-exec: POST or GET to a file path that first appeared as an upload event in the SAME session (upload-then-execute) → webshell drop + first access T1505.003 CRITICAL
+
+[TA0001 T1190, TA0043 T1595 T1590, TA0010 T1048, TA0005 T1036 T1557, TA0009 T1213, TA0006 T1078 T1552.001, TA0003 T1505]
+
+====================================================================
+SURFACE 2: WINDOWS + RDP  (surface=rdp)
+====================================================================
+
+Streams: AZ-GL Winlog-Beat=69c372d3d429347cf894f6f9; PROD-GL Winlog_beat=69f0732eed810c476d436c56; DEV-GL Winlogbeat=69bd408dc03705b637bb78af; OP-GL Winlog_beat=6819eb2b7708cd4fdd4d6a88.
+Fields (VERIFIED 2026-06-13 — event_data subfields carry the extra _winlog segment; the old winlogbeat_event_data_* spelling returns ZERO): winlogbeat_winlog_event_id, winlogbeat_winlog_channel, winlogbeat_winlog_provider_name, winlogbeat_winlog_event_data_TargetUserName, winlogbeat_winlog_event_data_IpAddress, winlogbeat_winlog_event_data_LogonType, winlogbeat_winlog_event_data_NewProcessName, winlogbeat_winlog_event_data_ParentProcessName, winlogbeat_winlog_event_data_CommandLine, winlogbeat_winlog_event_data_SubjectUserName. Host = winlogbeat_host_name / source.
+
+WINDOWS DATA REALITY (verified live across all 4 Winlog* streams 2026-06-13 — hunt to THIS, not an idealized Windows log):
+(1) QUALIFY EVERY EVENT-ID QUERY WITH CHANNEL. winlogbeat_winlog_event_id is NOT unique across providers — PROVEN: id 1102 on DEV = 1193 events but almost all are channel Microsoft-Windows-TerminalServices-RDPClient/Operational ("Connection Sequence"), NOT the Security "audit log cleared". Always add AND winlogbeat_winlog_channel:Security (or the specific channel) so a benign collision is never counted as an attack. Audit-clear 1102/104 + all 4xxx account/logon + 4662 + 4688 = channel Security; 7045/7036/7040 = channel System.
+(2) NO SYSMON shipped. Every Sysmon-only detection below has NO DATA and cannot fire here: LSASS access (Sysmon 10), driver load (Sysmon 6), registry value-set (Sysmon 13), WMI subscription (Sysmon 19/20/21), DLL side-load / CreateRemoteThread / process-tamper (Sysmon 7/8/25). These threats are covered by ESET EDR (Surface 8A) — hunt them THERE; never report clean here from their absence.
+(3) CONFIRMED FLOWING (use freely): 4662 (DCSync, all 4), 4688 WITH CommandLine + ParentProcessName (process chains / UAC bypass / LOLBins / encoded cmd — ~1.7M/day, AGGREGATE+FILTER never raw), 4624/4625 (logon/fail, low vol), 4776 + 8002/8004 (NTLM), 7045 (service install — VERY high volume, filter ImagePath %TEMP%/%APPDATA%/encoded + channel:System), 4698 (scheduled task), 1116/1117 (Defender), 4724 (password reset — NOT dropped), 4720/4728/4732/4756 (account & privileged-group create), 4719/4739/4616 (audit-policy / pw-policy / time change), 1149 + TerminalServices channels (RDP), 4771 (Kerberos PRE-AUTH FAILURE only — flows; 4768/4769/4770 do NOT, see (4)). [NOT in this list — DROPPED at collection, see (4): 4656/4663 handle/LSASS, 4672/4673/4674 privilege use, 4648 explicit creds.]
+(4) DROPPED AT COLLECTION (Winlogbeat is configured to EXCLUDE these event-IDs — they are NOT in any GL, ALWAYS return zero, and CANNOT be hunted here; do NOT query them, do NOT report clean from their absence, emit a one-line KNOWN-GAP note instead and pivot to the alternate surface): 4634/4658 (logoff/handle-closed), 4648 (explicit credentials → lateral-movement signal GONE), 4672 (special privileges assigned), 4673/4674 (sensitive privilege use — SeDebug/SeBackup/SeTakeOwnership), 4663/4660/4690 (object access/delete/handle-dup → LSASS-handle signal GONE), 4689 (process exit), 4768/4769/4770 (Kerberos AS/TGS/renewal → Kerberoasting / AS-REP / Golden+Silver-ticket NOT detectable), 5145 (detailed file share → SMB lateral NOT detectable), 5138/5158/5061/5058 (filtering-platform/crypto), 4932/4933 (AD replication source/dest), 4800/4801/4802/4803 (workstation lock/unlock/screensaver), plus DCOM/WMI/service noise (10016/36887/36874/36888/36871/3008/4354/10010/1014/6417/257/64/2003/1008/5013/100). WHERE TO HUNT INSTEAD: LSASS credential-dump (4663 dropped + no Sysmon) → ESET (Surface 8A); Kerberoasting/AS-REP/Golden/Silver (4768/4769 dropped) → not available, recommend re-enabling collection; SMB lateral (5145 dropped) → FortiGate/network (Surface 6) + 4624 Type 3; sensitive-privilege/UAC-via-privilege (4673/4674 dropped) → partial via 4688 process-chains only; explicit-creds lateral (4648 dropped) → 4624 Type 9/3 + NTLM 4776. ALSO AUDIT-OFF (not dropped, just not enabled — would light up if turned on): 4104 PowerShell Script Block (enable Script Block Logging GPO + ship PowerShell/Operational channel). 4720/4728/4732/4756 account/group-create ARE collected (Account-Management auditing on, 4724 present) — 0 events just means no changes; keep as mandatory.
+
+-- MANDATORY SINGLE-EVENT CHECKS (CRITICAL — search_logs_relative, flag immediately) --
+
+1102 / 104   Audit log cleared = evidence destruction T1070.001 CRITICAL
+7045 / 4697  New service installed (especially from %TEMP% %APPDATA% user paths) T1543.003 CRITICAL
+5001 / 5007  Windows Defender disabled or configuration changed CRITICAL
+4106         Domain trust change CRITICAL
+
+-- MANDATORY SINGLE-EVENT CHECKS (HIGH — search_logs_relative, flag immediately) --
+
+4720  New user account created
+4728 / 4732 / 4756  User added to privileged group (Domain Admins, Enterprise Admins, Local Admins, RDP Users, Backup Operators, Schema Admins)
+4698  Scheduled task created — inspect CommandLine for -enc IEX DownloadString Base64 bypass T1053.005
+4719  System audit policy changed T1562.002
+4739  Domain password policy changed
+4616  System time changed (evidence hiding) T1070.006
+4104  PowerShell script block — search for: -enc | IEX | Invoke-Expression | DownloadString | WebClient | -nop | bypass | AMSI | Reflection.Assembly T1059.001
+1116 / 1117  Windows Defender threat detected or action taken
+4769  Kerberos TGS with TicketEncryptionType=0x17 (RC4) = Kerberoasting T1558.003
+4768  PreAuthType=0x0 = AS-REP Roasting T1558.004
+
+-- MANDATORY SINGLE-EVENT CHECKS (added coverage: CREDENTIAL ACCESS / PERSISTENCE / LATERAL / RDP — search immediately, flag on any hit) --
+
+CRITICAL:
+4662 [LIVE all 4]        DS object access, Replicating Directory Changes GUID 1131f6aa-9c07-11d1-f79f-00c04fc2dcd2 = DCSync credential theft T1003.006 (channel:Security)
+LSASS handle (4656/4663) [DROPPED + no Sysmon]  4663 is dropped at collection AND there is no Sysmon 10 → LSASS credential-dump is NOT detectable on Windows logs; hunt it on ESET EDR (Surface 8A)
+7045 [LIVE-noisy]        Kernel service / driver ImagePath in %TEMP%/%APPDATA% or unsigned .sys = BYOVD T1543.003 / T1068 (channel:System; thousands of benign installs/day — filter ImagePath hard)
+Sysmon LSASS/driver/injection [NO DATA - no Sysmon]  Sysmon 6/10 absent → hunt credential-dump, malicious-driver, code-injection on ESET EDR (Surface 8A), NOT here
+4768 / 4769 Golden/Silver ticket [DROPPED - see (4)]  excluded at collection → ticket-forgery T1558.001/.002 not detectable on Windows logs
+
+HIGH:
+4724 / 4767 [LIVE]       Admin reset of ANOTHER account's password, or account unlocked off-hours, then logon = account takeover T1098 (channel:Security)
+Sensitive privilege use (4673/4674) [DROPPED]  excluded at collection → SeDebug/SeBackup/SeTakeOwnership abuse NOT directly detectable; partial signal only via 4688 process-chains (tools that require SeDebug)
+4688 UAC / LOLBin [LIVE] fodhelper|eventvwr|sdclt|computerdefaults spawning an elevated child = UAC bypass T1548.002; w3wp/outlook/word->cmd|powershell chains T1055 — read winlogbeat_winlog_event_data_ParentProcessName / NewProcessName / CommandLine; AGGREGATE (~1.7M 4688/day), never raw
+RDP sessions [PARTIAL]   1149 (RemoteConnectionManager) + TerminalServices-LocalSessionManager/Operational + 4624 Type 10 = RDP connect; external/first-seen source = RDP intrusion T1021.001. 4778/4779 (Security) = 0/24h → rely on TS channels + 4624 Type 10
+Kerberos tickets [DROPPED at collection]  4768/4769/4770 are excluded from Winlogbeat (not just audit-off) → Kerberoasting / AS-REP / Golden+Silver NOT detectable on Windows logs. Re-enable collection of these IDs to restore. Do NOT report clean. (4771 pre-auth FAILURE still flows — usable for spray detection only.)
+SMB lateral [DROPPED at collection]  5145 is excluded from Winlogbeat → ADMIN$/C$/IPC$ lateral movement NOT detectable on Windows logs T1021.002. Hunt SMB lateral on FortiGate/network (Surface 6) + 4624 Type 3 instead. Do NOT report clean.
+Registry / WMI persistence [NO DATA - no Sysmon]  Sysmon 13/19/20/21 absent + 4657 registry-audit not flowing → Run-key & WMI-subscription persistence NOT detectable; partial via ESET (Surface 8A) + 4698 scheduled-task (LIVE)
+5025 / 5034 / 1100 [check - channel-qualify]  Firewall service/driver stopped or Event Log service shut down = defense evasion T1562.004 (channel:System/Security)
+BITS-Client 59 / 60 [channel-dependent]  BITS job to external URL = stealth download/persistence T1197 — only if Bits-Client/Operational channel is shipped (not confirmed present — verify)
+
+-- WINDOWS HUNT ORDER (do not lead with failed logons) --
+
+Failed-logon volume (4625) is NOT the entry point — it shows what was ATTEMPTED, never what SUCCEEDED. A single 4624 SUCCESS from a new IP, off-hours, or LogonType 10/3 from an external IP is more dangerous than 10,000 4625 failures. Lead with WHAT HAPPENED and WHAT SUCCEEDED, then use success/failure as confirmation. Check BOTH modes:
+  SUSPICIOUS = the mandatory event-ID + command-line signatures above
+  ANOMALY    = first-seen IP/account/host, off-hours privileged action, never-before parent-child process chain, an account doing something it has no baseline for.
+
+STEP 1 — ACTION & SUCCESS CONTENT  (PRIMARY — what was actually done):
+W1. EventID distribution top 50 → are any mandatory CRITICAL/HIGH IDs present (1102, 7045/4697, 5001, 4720, 4728/4732/4756, 4698, 4104)? Each present = drill immediately, do NOT wait for a volume threshold.
+W2. Process creation 4688 / Sysmon 1 by ParentProcessName→ProcessName + CommandLine → read the command-line CONTENT (SUSPICIOUS): -enc | IEX | Invoke-Expression | DownloadString | WebClient | -nop | bypass | AMSI | FromBase64String | certutil | bitsadmin | mshta | rundll32 | regsvr32 scriptlet; suspicious chains w3wp/iis→cmd, outlook→cmd, word/excel→powershell, mshta→cmd, wscript→powershell, svchost→unknown_binary T1055.
+W3. Successful logon 4624 CONTENT: LogonType distribution → Type 10 (RDP) or Type 3 from EXTERNAL IP; Type 9 (NewCredentials = PtH T1550.002); by source IP → new/first-seen IP for the account (ANOMALY); off-hours (23:00-05:00) success for privileged accounts.
+W4. Privilege & credential use (COLLECTED SET ONLY — 4672/4648/4673/4674/4768/4769 are DROPPED, do NOT query them): 4662 with the Replicating-Directory-Changes GUID by a non-DC account = DCSync T1003.006; 4776 NTLM-validation anomalies (spike / from unexpected host); 4698 task with Base64/encoded command T1053.005; 4724 admin reset of ANOTHER account's password then a logon = account takeover T1098. Credential-theft via LSASS/Kerberos and explicit-cred lateral live on ESET (8A) + network (6), NOT here.
+W5. ANOMALY mode: any account performing an action type with NO baseline (first service install, first scheduled task, first privileged-group change, first logon to a host it never touched).
+
+STEP 2 — OUTCOME AS CONFIRMATION  (success vs failure grades severity, never gates detection):
+For each suspicious actor/account from STEP 1, correlate failure→success: 4625 burst THEN 4624 success same user within 30 min = CONFIRMED brute-force success T1110 HIGH; 4625 with no success = attempted (still report); 4768/4771 pre-auth failures then a granted ticket = confirmed. A privileged action that COMPLETED (4728 success) outranks any number of failures.
+
+STEP 3 — BEHAVIORAL / VOLUMETRIC ANOMALY  (runs alongside; failed-logon counting lives HERE, not at the lead):
+W6. 4625 by source IP top 50 → >30 failures single IP = brute force T1110; many IPs same /24 = distributed spray.
+W7. 4625 by TargetUserName top 50 → admin/administrator/sa targeted; many unique usernames same IP = spray.
+W8. 4771 (Kerberos pre-auth failure) spike from single IP → AS-REP targeting T1558.004.
+W9. Cadence/beaconing: repeated logon or process events at a fixed interval from one source = automation or C2.
+
+[TA0008 Lateral Movement, TA0003 Persistence, TA0006 Credential Access, TA0004 Privilege Escalation]
+
+====================================================================
+SURFACE 3: AZURE / ENTRA ID  (surface=azure)
+====================================================================
+
+Streams: mycasepoint.com AZ-GL=65cf0501c0fccf5d65f5025f; casepoint.com PROD-GL=6979bcc8245e61e78824df15; casepoint.in DEV-GL=69fb008584d94819ed097db0. OP-GL: N/A.
+MANDATORY: Check ALL THREE streams every run. AZ-GL is most commonly skipped — always do it first. THIS IS THE PRIMARY DEEP SURFACE — Windows is collection-limited (many event-IDs dropped, no Sysmon), so the Azure/Entra Event Hub carries the richest identity telemetry available. Run EVERY mandatory check below in FULL on all 3 streams every run — token/AiTM, ALL audit-operations (MFA-registration, SP/app-credential-add, federation, illicit-consent, policy-tampering), ALL riskEventTypes, legacy-auth, device-code, geo/impossible-travel. Do NOT sample, do NOT skip a check because the sign-in volume looked quiet, do NOT call a category clean off a null named field (search the raw message).
+DEV-GL RESTORED (verified live 2026-06-14): the casepoint.in "Azure event Hub" stream (69fb008584d94819ed097db0) was dead 2+ months but the connector was FIXED 2026-06-14 and is flowing again — categories: MicrosoftGraphActivityLogs, MicrosoftServicePrincipalSignInLogs, SignInLogs, AuditLogs. Hunt it as a NORMAL active stream alongside AZ-GL and PROD-GL (it adds Graph-API-abuse and service-principal sign-in coverage the other tenants' SignInLogs lack). RAMP-UP: data resumed ~2026-06-14 morning, so the first full 24h window is 2026-06-15; a low count before then is expected, not a gap. Only emit a stream-empty REVIEW if total=0 over the 24h window.
+
+VERIFIED FIELD MAP - FIELD CONVENTION IS PER-GL; DO NOT ASSUME ONE SET (this is the gap that missed the DEV-GL credential-stuffing on 2026-06-15):
+  - AZ-GL + PROD-GL: properties_* names (flattened extractor); azure_prob_*/azure_prop_* twins also present.
+  - DEV-GL (casepoint.in, stream 69fb008584d94819ed097db0): azure_prop_* / azure_prob_* / azure_result_* / source_ip_country_code ONLY - properties_* are ABSENT here (verified live 2026-06-15). Identity = azure_prop_user_principal_name (proP, not proB); failure = azure_result_signature:FAILURE; result code = azure_result_type; country = source_ip_country_code.
+  HARD RULE (same doctrine as the IIS "DO NOT SKIP UNPARSED LOGS" rule): a stream with >0 events whose expected fields come back null is NOT unparsed and NOT clean. Before ANY "fields missing / unparsed / REVIEW / coverage-gap" verdict you MUST: (1) re-query on the twin convention (azure_prop_*/azure_result_*); then (2) sweep the raw/unparsed events with NOT _exists_:azure_result_signature (and NOT _exists_:VENDOR_EVENT_CATEGORY) and hunt those raw full_message / message bodies for the SAME signals (result codes 50126/50053/50074, legacy clientAppUsed values, userPrincipalName, riskEventType). "properties_* null" is NEVER a terminal verdict on a stream that has events.
+  CONVENTION-PROOF FORM (prefer this so a GL's naming can never cause a miss): failures = (azure_result_signature:FAILURE OR resultSignature:FAILURE); identity = (azure_prop_user_principal_name OR properties_userPrincipalName); country = (source_ip_country_code OR properties_location_countryOrRegion).
+  Field rows below show the properties_*/twin names - on DEV-GL use the azure_prop_*/azure_result_* twin:
+  log category        VENDOR_EVENT_CATEGORY   (SignInLogs | ManagedIdentitySignInLogs | AuditLogs)
+  success / failure   resultSignature (SUCCESS|FAILURE) + resultType / properties_status_errorCode (numeric)
+  user                properties_userPrincipalName / azure_prop_user_principal_name ; properties_userDisplayName
+  app                 properties_appDisplayName / azure_prob_app_disply_name ; properties_appId
+  client app (LEGACY) properties_clientAppUsed  — legacy values 'Authenticated SMTP' / 'IMAP4' / 'POP3' / 'Exchange ActiveSync' / 'Other clients' = MFA-bypassing (CONFIRMED present: PROD has Authenticated SMTP)
+  auth protocol       properties_authenticationProtocol  ('deviceCode' = device-code phishing)
+  auth requirement    properties_authenticationRequirement  ('multiFactorAuthentication' vs 'singleFactorAuthentication')
+  incoming token      properties_incomingTokenType  ('primaryRefreshToken' = PRT / token-replay signal)
+  token protection    properties_tokenProtectionStatusDetails_signInSessionStatus  ('unbound' = unbound session token = AiTM/theft signal)
+  CA status           properties_conditionalAccessStatus / azure_prob_condi_access_status ; properties_appliedConditionalAccessPolicies (per-policy result)
+  risk                properties_riskEventTypes / properties_riskEventTypes_v2 ; properties_riskState ; properties_riskLevelAggregated ; properties_riskDetail
+  named/trusted loc   properties_networkLocationDetails  (networkType 'trustedNamedLocation' = trusted-location abuse)
+  geo country         properties_location_countryOrRegion / source_ip_country_code / azure_prob__country_code ; city = properties_location_city
+  ASN                 properties_autonomousSystemNumber
+  source IP           callerIpAddress / source_ip / properties_ipAddress
+  audit operation     operationName (ONLY on VENDOR_EVENT_CATEGORY:AuditLogs — confirmed values incl. 'Reset user password','Disable account','Hard delete service principal','Admin deleted security info','Update StsRefreshTokenValidFrom Timestamp','Update PasswordProfile','Add member to group')
+  MFA / security info AuditLogs operationName 'User registered security info' / 'Admin registered security info' / '...deleted security info' = MFA-method change (persistence signal)
+NOTE: MDO Safe Links / Exchange (UrlClickEvents, inbox rules) are NOT in this Event Hub — only SignIn + ManagedIdentity + Audit categories are present. On these tenants the phishing-click signal is properties_riskEventTypes, NOT Safe Links.
+Field name typos (use exactly as-is): azure_prob_app_disply_name OR azure_prop_app_disply_name; azure_prob_condi_access_status.
+NOISE FLOOR — suppress, do not alert on: 70043, 70044, 50173, 50140.
+
+-- MANDATORY SINGLE-EVENT CHECKS (flag immediately on any occurrence) --
+
+50201  Microsoft flagged Suspicious Activity = HIGH always (even from Cato egress IPs) T1078
+53003  Conditional Access block — investigate why, who, from where T1556.006
+
+-- MANDATORY SINGLE-EVENT CHECKS (added coverage: TOKEN / PERSISTENCE / BYPASS / PHISHING / GEO) --
+NOTE: if a named field returns zero, search the raw message for the operation name / clientAppUsed / riskEventType value — do NOT call clean off a null named field (Entra parsing varies per tenant stream).
+
+HIGH (drill regardless of result code):
+AiTM / token replay      Successful sign-in that satisfied MFA with NO interactive challenge (single-factor where the user/CA requires MFA), or a session/token reused from a new IP/device = adversary-in-the-middle session hijack T1557 / T1539. AiTM is the current #1 cloud intrusion path — treat success-without-expected-MFA as HIGH, not a CA-misconfig footnote.
+Phishing clicked         (if Defender for O365 / MDO Safe Links streams to the hub) UrlClickEvents ClickAction=Allowed / "user clicked malicious URL", user-reported phish, or ZAP (zero-hour auto purge) fired = phishing victim → pivot to that user's VERY NEXT sign-in for AiTM/token-theft T1566. If MDO is NOT in the hub, the phishing signal is the riskEventType row below.
+Risk detections          Entra ID Protection riskEventType — map EACH present: leakedCredentials, maliciousIPAddress, anonymizedIPAddress (Tor/VPN), unfamiliarFeatures, impossibleTravel, passwordSpray, suspiciousInboxManipulation, anomalousToken = HIGH on any medium/high-risk detection T1078.
+MFA method registration  Audit "Register security info" / "User registered security info" / "Admin registered security info" / new Authenticator or FIDO key = attacker enrolling OWN MFA after takeover (persistence) T1098.005 — HIGH if off-hours or new IP/country.
+SP / app credential add  "Add service principal credentials" / "Update application - Certificates and secrets management" / "Add owner to application|service principal" = credential backdoor on an identity T1098.001.
+Federation backdoor      "Set domain authentication" / "Set federation settings on domain" / new trusted IdP = Golden SAML forged-token federation trust T1484.002 — CRITICAL if not a known change.
+Illicit consent          "Add delegated permission grant" / "Add app role assignment to service principal" granting Mail.ReadWrite, full_access_as_app, Directory.ReadWrite.All, Files.ReadWrite.All = consent-grant persistence T1528.
+Legacy authentication    clientAppUsed in {IMAP4, POP3, SMTP, Authenticated SMTP, Exchange ActiveSync, Other clients} = MFA-bypassing protocol; ANY success on an MFA-enforced user = T1078.004.
+Device code phishing     authenticationProtocol "deviceCode" from an unexpected user/context = device-code phishing T1528.
+Policy tampering         Named Location added/modified (attacker trusts own IP); CA policy set report-only/disabled or new exclusion; Authentication Methods policy weakened = defense evasion T1556.
+Dormant-account probing  50057 sign-in attempts to DISABLED accounts; 50053 smart-lockout spike = targeted attack on known users.
+Failed-auth concentration  MANDATORY BASIC (the sagar.safiwala class; run on EVERY tenant EVERY run; NOT exempted by the success-first hunt order below): aggregate FAILUREs - (azure_result_signature:FAILURE OR resultSignature:FAILURE) AND NOT azure_result_type:(53003 70043 70044 50173 50140) - grouped by identity (azure_prop_user_principal_name OR properties_userPrincipalName). FLAG any single UPN with >=10 failures OR failures from >=5 distinct source_ip_country_code in 24h = targeted brute-force / credential stuffing T1110.004 (legacy clientAppUsed here, e.g. Authenticated SMTP / BAV2ROPC, = MFA-bypass-capable). Then query that UPN for ANY SUCCESS = breach pivot, escalate. A single UPN buried under thousands of failures from many countries IS the finding - surface it even on a quiet day.
+Mail rules / forwarding  (if Exchange/O365 audit in the hub) New-InboxRule/Set-InboxRule with forward/delete/redirect, or mailbox SMTP forwarding enabled = BEC exfiltration T1114.003.
+
+GEO (first-class — aggregate EVERY run on all 3 tenants, never skip):
+Aggregate sign-ins by Geo COUNTRY and by source-IP ASN/org. FLAG: any successful auth from OUTSIDE the GEO-ACL (MEDIUM min — name country + ASN); same user 2 countries or 2 distinct-ASN IPs within 2h = impossible travel HIGH T1078; sign-in from hosting/VPN/Tor/anonymizer ASN (distinct from known Zscaler/Cato egress) = elevated risk; first-ever country for a privileged account = HIGH; cluster of one country hitting many users = spray origin.
+
+-- AZURE HUNT ORDER (do not lead with error codes) --
+
+Error-code distribution is NOT the entry point — 50126 failures show what was ATTEMPTED, never what SUCCEEDED. A single SUCCESSFUL sign-in (result 0) from a new country, new device, or with NO MFA challenge is far more dangerous than thousands of 50126 failures. Lead with WHAT WAS ACCESSED and WHAT CHANGED (application, audit operation, identity, location/device), then use the result code as confirmation. Check BOTH modes:
+  SUSPICIOUS = mandatory signatures (50201 always; risky audit ops — OAuth org-wide consent, new admin role, CA policy disable/modify, service principal create, MFA fatigue)
+  ANOMALY    = new country/IP/device for a user, impossible travel, first-time app access, success-without-MFA, off-hours PIM activation.
+
+STEP 1 — ACCESS & OPERATION CONTENT  (PRIMARY — what was accessed / changed):
+Z1. Application access distribution → first-time app access for a user; Azure Portal / Azure Management / Graph from unusual device or location; SUCCESSFUL access to a crown-jewel app (eCase, FOIA, PAL, Platform) from an anomalous context = high-value target.
+Z2. Audit operations distribution (SUSPICIOUS — drill immediately regardless of result code) → CA policy add/modify/delete T1556.006; new admin role assigned T1098; OAuth app consent granted org-wide T1528 HIGH; service principal / app registration created; guest invited T1136.003; PIM activation off-hours; Key Vault bulk secret access.
+Z3. Identity + location CONTENT → new country for a user (ANOMALY); same user 2 countries within 2h = impossible travel T1078 HIGH (regardless of success); new device first-seen for a privileged account; non-compliant device on admin portal.
+Z4. ANOMALY mode: success from an IP / device / country never seen for that user, especially off-hours = token theft / session hijack T1528.
+
+STEP 2 — RESULT CODE AS CONFIRMATION  (grades severity, never gates detection):
+For each identity/app flagged in STEP 1, read the result: SUCCESS (0) from anomalous context = CONFIRMED compromise HIGH; success WITH NO MFA challenge = CA gap or token replay; 50126/50074 then success same IP = credential-stuffing success T1078; 50126 with no success = attempted (still report); 53003 CA block = investigate why/who/where T1556.006. A successful sign-in outranks any failure pile.
+
+STEP 3 — BEHAVIORAL / VOLUMETRIC ANOMALY  (runs alongside; error-code counting lives HERE, not at the lead):
+Z5. Error code distribution (exclude 70043/70044/50173/50140) → 50126 >20 unique users single IP = password spray T1110.003; 50020 >50 single IP = account enumeration T1589; 53003 >500 single user = device/compromise.
+Z6. Top 50 source IPs by event count → single IP many events = automation; new IP for admin account.
+Z7. Top 50 users by failed sign-in count → admin/service accounts targeted.
+Z8. MFA result distribution → failure spike single user = fatigue T1621 (>5 push approvals/30min = CRITICAL); approval from new country = impossible travel.
+
+-- IDENTITY ATTACK PATTERN RECOGNITION (apply analytically to STEP 1-3) --
+
+Password spray:     50126 from many unique users, single IP, short time window T1110.003
+Credential stuffing: 50126 then 50074 (MFA required) then success from same IP T1078
+Enumeration:        50020/50034 bulk from single IP >50 in 24h T1589
+Impossible travel:  Same user 2 countries within 2h = HIGH regardless of success T1078
+Token theft:        Success from IP never previously seen for that user + off-hours T1528
+MFA fatigue:        >5 push approvals same user in 30 min = CRITICAL T1621
+OAuth consent:      New app granted org-wide permissions = HIGH T1528
+Guest access:       Guest account accessing production resources or admin portals T1136.003
+
+[TA0001, TA0006 Credential Access, TA0004 Privilege Escalation, TA0003 Persistence]
+
+====================================================================
+SURFACE 4: LINUX  (surface=linux)
+====================================================================
+
+Streams: rsyslog/auth streams all 4 GLs (IDs in streams.json). Allow-list: jndi, ceurufrd.
+DATA REALITY (verified 2026-06-13): all 4 rsyslog streams LIVE (AZ 5.1M, DEV 1.4M, PROD, OP 48k/24h) but SSH/sudo auth is NOT field-parsed — there is NO username / src_ip / result named field; it is all in raw `message` (e.g. "host sshd[pid]: Failed password for root from 1.2.3.4 port 22"). Hunt the `message` field by keyword (sshd, "Failed password", "Accepted password", sudo, "authentication failure", "session opened"); narrow with facility:security/authorization. You CANNOT aggregate by a parsed user/IP field — extract IP/user from message text. These streams are mostly postgres/redis HOST syslog; auth is a small slice (PROD sshd ~150/24h). KEEP QUERIES SIMPLE: long multi-term OR queries fail with too_many_nested_clauses on these large streams — query one signature at a time.
+
+-- MANDATORY SINGLE-EVENT CHECKS (CRITICAL — search immediately) --
+
+Web server spawning shell: nginx / apache2 / httpd / php-fpm spawning bash sh dash zsh = webshell execution T1505.003
+/tmp or /dev/shm execution: any process executed from /tmp/ /dev/shm/ /var/tmp/ T1059
+/etc/sudoers written: any modification outside expected admin operations T1548.003
+/etc/passwd written: user added unexpectedly T1136
+/root/.ssh/authorized_keys written: new SSH key added T1098.004
+Rootkit indicator: insmod or modprobe for unrecognized module name T1547.006
+LD_PRELOAD set for non-root process T1574.006
+Container escape: process breaking cgroup/namespace boundaries T1611
+
+-- MANDATORY SINGLE-EVENT CHECKS (HIGH) --
+
+Reverse shell: nc -e | bash -i >& /dev/tcp | python -c.*socket | perl.*reverse | socat exec T1059
+Crypto miner process: xmrig kdevtmpfsi kinsing sysrv masscan in process name or cmdline T1496
+Root SSH from external IP: direct root login success T1078
+Cron added by non-root user T1053.003
+SUID bit set on unexpected binary T1548.001
+New cron or service pointing to /tmp/ or /dev/shm/ T1053
+
+-- OBSERVE --
+
+O1.  SSH failed auth top 50 source IPs → >10 failures = brute force T1110.003; many IPs same /24 = distributed
+O2.  SSH failed auth top 50 usernames → root admin oracle ubuntu common accounts; many unique = spray
+O3.  SSH success top 20 source IPs → new IP for privileged account; root from external IP = CRITICAL
+O4.  Process execution top 50 names → crypto miner names; unusual interpreters (python3 -c, perl -e, ruby -e, php -r); network tools on server (nmap masscan nc ncat socat)
+O5.  Sudo events top 20 users + commands → sudo bash | sudo su | sudo vi/less/more/man (GTFO bins) = privilege escalation T1548
+O6.  Auth events by time distribution → off-hours spike (23:00-05:00) = active attack
+O7.  Web server process children → any nginx/apache/httpd spawning unexpected child processes
+
+[TA0004, TA0003, TA0011, TA0040]
+
+====================================================================
+SURFACE 5: SFTP + REBEX  (surface=sftp)
+====================================================================
+
+Streams: PROD-GL: External_SFTP_cerebus, Internal_SFTP_cerebus, DTC_Rebex_PROD, DTC_Rebex_CA, DTC_Rebex_PT. OP-GL: External_SFTP, Internal_SFTP. DEV-GL: SFTP_cerebus, DTC_Rebex. AZ-GL: DTC_Rebex. (all IDs in streams.json).
+DATA REALITY (verified 2026-06-13, DEV volume added 2026-06-17): ALL SFTP streams LIVE — incl. the OP External/Internal_SFTP (86k/106k), DEV SFTP_cerebus (54k), DEV DTC_Rebex (~15k/24h, 7 hosts: DRMTARAAGT901-904 + MTARAAGT901-903), AZ Rebex (261k), PROD Rebex (506k) / Cerberus (85k). FIELD CAUTION: the `source` field is UNRELIABLE on SFTP streams (the parser fills it with log-level tokens like CONNECT / ERROR, not the host). Use `Client_ip` for the client IP and `Size_In_MB` for transfer volume; pull username / file / action from `message`. Do NOT aggregate SFTP by `source`. DEV DTC_Rebex NOTE: on Rebex auth events the source host (e.g. DRMTARAAGT901) IS in the `source` field — it is reliable for host attribution on these auth log lines only (not for Cerberus). Internal DTC app server 10.104.50.16 generates auth events against all 7 DTC Rebex hosts — normal.
+
+DTC_REBEX STREAMS (renamed 2026-06-16 to a uniform DTC_Rebex* prefix - hunt all five the SAME way): AZ-GL DTC_Rebex=616813d3067ed03d6e7c1b2d ; PROD-GL DTC_Rebex_PROD=6149e2537a8c5b2399280cfd, DTC_Rebex_CA=63e108dbdf8f37233e873254, DTC_Rebex_PT=642d75005ffb1c339b41cb6c ; DEV-GL DTC_Rebex=6130d9e5d5307c39dba868aa. OP-GL has NONE (Cerberus only). MIXED STREAMS: each DTC_Rebex carries BOTH Rebex SFTP/SSH auth lines AND IIS filebeat (DTC log-upload) lines - hunt BOTH layers on every one. Do NOT mark a DTC_Rebex stream "IIS status 200 clean" and skip its SFTP auth side (that is how AZ DTC_Rebex was missed).
+
+DTC AUTH RULE (suppress the failure noise, ALWAYS drill the success - run every time):
+- FAILURE VOLUME TIERS — severity depends on scale and source:
+    SUPPRESS ENTIRELY (no finding): (a) Massive internal flood: single internal agent hammering thousands/day at ~30s cadence (e.g. PROD 10.250.100.251 — known misconfigured agent, thousands/day = pure noise). (b) External SSH dictionary brute using common usernames (root/admin/ubnt/postgres/debian/git/nagios/user/test/deploy) that never succeeds — external noise.
+    LOW finding (emit, don't escalate): Bounded failure burst from internal IP (10–200 failures over 1–2 hours) with GUID/token-based "usernames" (e.g. UUIDs like 558638c5-...) = stale service credential on a specific host. Pattern: same PID suffix across all sessions, 2/min cadence, specific host only (e.g. 28 failures on DRMTARAAGT901 from 10.104.50.16 in 62 min, 2026-06-16). Known internal DTC app server: 10.104.50.16 (talks to DRMTARAAGT901-904 + MTARAAGT901-903). Action: "Rotate/refresh the service credential on <host>."
+- SUCCESS PIVOT (this MUST fire): search each DTC_Rebex stream for "Authentication Succeeded" / succeeded. The client IP is in the "... Authentication Succeeded <ip>" text, NOT the Client_ip field.
+    CRITICAL: a SUCCESS for a system/dictionary username (root admin ubnt postgres debian git nagios user test deploy oracle sa) = brute-force breach [T1110.001 + T1078].
+    HIGH: a SUCCESS from an EXTERNAL (non-RFC1918) IP, OR a failure-burst identity that then succeeds in the same window.
+    BENIGN (no finding): successes for real named users from internal/known IPs (e.g. sandip.parmar@casepoint.in / 10.250.201.249 ; mriles@rwrlawyers.ca ; herbi.marquez@usda.gov / 10.66.1.35 ; bhumika.prajapati@casepoint.in from 10.104.50.16).
+- IIS side of these streams: DTC log-upload 401 bursts (/api/UploadDownload/... GUID vs dtc*.casepointgov.com) = benign stale-credential bursts = LOW; escalate only if a 200 follows the 401s from the same external IP.
+
+-- MANDATORY CHECKS --
+
+CRITICAL: Admin account authenticating to SFTP (should be transfer accounts only)
+HIGH: New source IP never seen before + successful auth T1078
+HIGH: Auth failure spike >20 from single IP then success = brute force + compromise T1110
+HIGH: Bulk download single session >500MB = exfiltration T1048
+
+-- OBSERVE --
+
+O1.  Top 50 source IPs by session count → new/first-seen IPs; off-hours sessions (23:00-05:00)
+O2.  Auth failure distribution by IP and username → >10 failures single IP = brute force; multiple usernames same IP = credential stuffing T1110
+O3.  Transfer volume by user and session (Rebex + Cerebus streams) → single session >100MB = bulk download; multiple sessions same user short window = data staging T1048
+O4.  File access by directory → unexpected directories: /backup/ /archive/ /database/ /export/ /keys/ /certs/
+O5.  Suspicious file extensions in transfers: .exe .ps1 .sh .bat .dll .php .py uploaded or downloaded
+O6.  Rebex "address is blocked" events by IP → >300 in 24h = sustained brute T1110
+O7.  Large upload events: "Successfully stored file" frequency or size → staging before lateral move or exfil reverse
+
+[TA0010, T1048, T1105, T1110]
+
+====================================================================
+SURFACE 6: NETWORK / FIREWALL  (surface=firewall|switch|lb)
+====================================================================
+
+Streams: infra-streams.json firewall/switch/lb categories.
+DATA REALITY (verified 2026-06-13): all 4 FortiGate streams LIVE & richly parsed (AZ 1.4M, PROD 1.7M, DEV 1.06M, OP 249k/24h). Use native FortiGate field keys (no prefix): action (accept|deny|...), srcip, dstip, dstport, service, proto, srcintf / srcintfrole (wan=external), srccountry / dstcountry, sentbyte / rcvdbyte, sessionid, policyid, subtype (traffic|local|forward), devname. DEV note: MTFW01 is RETIRED — the live DEV firewall source is SRFW01 (+ MTFW01_HA).
+
+-- MANDATORY SINGLE-EVENT CHECKS (HIGH always) --
+
+Inbound ALLOW from external (non-RFC-1918) IP to any of: 22 | 3389 | 445 | 3306 | 1433 | 5432 | 5985 | 5986 | 8080 | 8443 T1133
+FortiGate admin login from unexpected source IP T1078
+Firewall policy modification T1562.004
+IPS alert triggered (any) — HIGH minimum
+
+-- OBSERVE --
+
+O1.  Inbound ALLOW top 50 source IPs + destination ports → external to sensitive ports; single IP to many ports = scan T1046
+O2.  Inbound DENY top 50 source IPs by count → >100 denies single IP = port scan; >50 unique dest ports = scanner T1046
+O3.  Outbound traffic top 50 destination IPs by bytes transferred → large outbound to single external = exfiltration; unusual destination countries (threat intelligence context)
+O4.  Non-standard outbound ports: 4444 5555 6666 6969 31337 9001 9030 → malware C2 or Tor T1095
+O5.  Internal east-west traffic: SMB (445) or RDP (3389) or SSH (22) between internal hosts in unusual pattern → lateral movement T1021
+O6.  Outbound bandwidth anomaly → >10GB to single destination 24h; upload/download ratio >10:1 = exfil T1048
+O7.  Beaconing detection → aggregate external_destination_ip by connection_count, filter 10<count<200 with low data volume per connection = periodic C2 beacon T1071
+O8.  DNS anomaly (if FortiGate captures) → high-entropy subdomain queries = tunneling T1071.004; single host >1000 DNS queries 24h; Tor or newly registered domains
+O9.  VPN auth failure spike → brute force on VPN T1110; VPN connections from unusual countries
+O10. KEMP L7 timeout spike → possible C2 channel T1095
+O11. FortiGate admin actions → policy change; object creation; admin account event outside business hours
+
+[TA0043, TA0001, TA0011, TA0010]
+
+====================================================================
+SURFACE 7: DATABASE + DATA SERVICES  (surface=db)
+====================================================================
+
+Streams: infra-streams.json db category. OP-GL: Elasticsearch=69df8e2c29a1e110357a3008 is LIVE (64k/24h); Opensearch=68ef0a3dfa794807d75227c5 is EMPTY (0/24h, verified 2026-06-13) — do NOT query it.
+DATA REALITY (verified 2026-06-13): the "Elasticsearch" streams are the Graylog backend's OWN server log (/var/log/opensearch/graylog.log — Java stack traces, GC, cluster health), NOT a database query/DDL audit; PgBouncer streams are mostly periodic "LOG stats:" lines. There is NO SQL statement-level audit in this data, so the TRUNCATE/DROP/ALTER/bulk-SELECT checks below are largely NOT detectable here — set expectations: DB-surface signal = connection-source anomalies, auth-failure / FATAL bursts, max_client_conn floods, and search-tier errors, NOT query content. Redis / RabbitMQ / MqQueue are connection/queue infra logs (raw message). Treat "no DDL found" as "not logged", NOT "clean".
+
+-- MANDATORY CHECKS --
+
+CRITICAL: TRUNCATE or DROP TABLE event = data destruction T1485
+HIGH: DDL (DROP ALTER TABLE CREATE USER) outside maintenance window T1485
+HIGH: DB admin account (sa/postgres/root/admin) making direct queries — should go via application layer
+HIGH: RabbitMQ queue purge event T1485
+HIGH: Direct DB connection from IP that has never connected before
+
+-- OBSERVE --
+
+O1.  Source IP distribution → new IP connecting to DB = direct bypass of app layer; dev IP querying prod = environment boundary violation T1021
+O2.  DB account usage distribution → admin accounts making direct queries; app accounts making admin-level operations
+O3.  Query volume by account and time → >10,000 queries from single account 24h = bulk extraction; off-hours (23:00-05:00) bulk SELECT = exfiltration T1048
+O4.  DDL operations → DROP ALTER CREATE outside maintenance window T1485
+O5.  Failed connection attempts top 50 source IPs → repeated failures = brute force T1110
+O6.  Sensitive table access → queries to user_accounts passwords tokens api_keys personal_data audit_log by unusual account T1078
+O7.  Redis dangerous commands (count EACH separately — NEVER combine with OR): CONFIG | SLAVEOF | FLUSHALL | MODULE | NOAUTH T1485
+O8.  RabbitMQ: access-refused or auth-failure count; queue purge events T1485
+O9.  Postgres: FATAL auth or role error spikes; connection from unexpected IP; privilege escalation grants
+O10. Elasticsearch/OpenSearch: FATAL or error burst; bulk delete; index deletion; shard manipulation T1485
+O11. PgBouncer: max_client_conn exceeded = connection flood / DoS indicator T1499
+
+-- DTC (Distributed Transaction Coordinator) --
+If DTC streams present in streams.json: DTC network access from unexpected IP = lateral movement pivot (T1021); DTC security policy change = privilege escalation vector; spike in failed distributed transactions = possible tampering or denial-of-service.
+
+[TA0006, TA0008, TA0040]
+
+====================================================================
+SURFACE 8: EDR + MFA + VM + HW  (surface=edr|mfa|virt|hw)
+====================================================================
+
+Streams: infra-streams.json edr/mfa/virt/hw categories. Hunt each sub-surface in sequence.
+
+-- 8A: ESET EDR  (surface=edr) --
+
+MANDATORY — any detection is HIGH minimum. Flag with threat name and action taken:
+CRITICAL: Active threat on DC / admin workstation / production server
+CRITICAL: Same threat family on 3+ hosts in 24h = active spread T1210
+CRITICAL: Threat action = allowed = malware executed without block T1204
+HIGH:     Execution blocked (attack attempted, stopped)
+HIGH:     Script-based detection: PowerShell JavaScript VBScript macro T1059
+MEDIUM:   PUA (potentially unwanted application) = lateral movement tooling risk
+REVIEW:   Repeated same detection same host = persistence attempt or noisy signature
+
+OBSERVE:
+O1. All detections by threat_name → new family not seen before? Same family multiple hosts?
+O2. All detections by hostname → server with detections (expected: user workstations only)?
+O3. Detection action distribution → quarantined vs cleaned vs blocked vs allowed (allowed = highest priority)
+O4. ESET protection status events → protection disabled or scan deferred = coverage gap
+
+-- 8B: SECURENVOY MFA  (surface=mfa) --
+
+MANDATORY:
+CRITICAL: MFA fatigue: >5 push approvals same user within 30 minutes T1621
+HIGH:     New MFA device enrolled off-hours = attacker enrolling own device T1098.005
+HIGH:     Admin account MFA event from new country or new IP
+HIGH:     Bulk MFA failure from single IP >10 = spray targeting MFA T1110
+HIGH:     Single user >10 MFA failures then success = MFA bypass or social engineering T1621
+
+OBSERVE:
+O1. Auth result distribution (success/failure/denied) → spike in failures or denials?
+O2. Top 20 users by MFA failure count → admin accounts with failures? Failure burst then success?
+O3. Top 20 source IPs by MFA event count → new IPs triggering MFA for multiple users = spray T1110
+O4. New device enrollment events → when enrolled, by whom, business hours?
+O5. Geographic distribution → same user from 2 countries within 2h = impossible travel T1078
+
+-- 8C: VIRTUALIZATION  (surface=virt) --
+
+MANDATORY:
+CRITICAL: Mass snapshot creation across >5 VMs simultaneously = ransomware preparation T1490
+CRITICAL: Mass VM deletion or shutdown = destructive attack T1561
+HIGH:     VM export or clone by unexpected user = data exfiltration T1530
+HIGH:     vCenter or Hyper-V admin login from new source IP T1078
+HIGH:     VM console access = bypasses all network controls T1021
+MEDIUM:   New VM created by unexpected user = attacker infrastructure T1583
+
+OBSERVE:
+O1. VM operations distribution: snapshot/delete/export/clone/poweroff/create → bulk ops across multiple VMs in short window?
+O2. Operations by user account → unexpected user doing VM-level operations; service accounts at admin level
+O3. vCenter/management console login events → new source IP; off-hours admin login
+O4. Failed admin login attempts → brute force on vCenter/Hyper-V management interface T1110
+
+-- 8D: HARDWARE — Dell iDRAC / HP iLO / Pure Storage  (surface=hw) --
+
+MANDATORY:
+CRITICAL: Firmware update event on any server = persistent implant risk T1542
+CRITICAL: BMC/iDRAC/iLO login from external (non-RFC-1918) IP = complete OS bypass T1078
+HIGH:     Failed iDRAC/iLO login spike >5 from any IP = brute force on IPMI T1110
+HIGH:     Pure Storage snapshot deletion = ransomware preparation T1490
+HIGH:     Serial console access to any server
+MEDIUM:   iDRAC/iLO network configuration change T1565
+MEDIUM:   Power cycle or hard reset outside maintenance window T1529
+
+OBSERVE:
+O1. All hardware events by event_type/action → any firmware events? Bulk power operations?
+O2. Login events by source IP → external IPs (should never directly reach iDRAC/iLO); new internal IP not in management VLAN
+O3. Pure Storage operations → snapshot create vs delete counts; volume deletion; replication changes
+
+[TA0002, TA0006, TA0010, TA0040, TA0042]
+
+====================================================================
+CROSS-SURFACE CORRELATION  (after all surfaces complete)
+====================================================================
+
+Build entity lists from all findings: suspicious IPs, usernames, hostnames, 30-minute time windows with multi-surface activity.
+
+C1. IP in 2+ surfaces → IIS hit + Windows auth; SFTP auth + Azure sign-in; Firewall deny + IIS exploit attempt = multi-vector coordinated attack; escalate all to CRITICAL
+C2. Time correlation: events across surfaces in same 30-min window → coordinated attack signal; ESET detection + Windows 7045 (new service) = malware establishing persistence in one session
+C3. User/account in 2+ surfaces: Azure login + RDP success = credential reuse; SFTP bulk download + DB bulk query same user same hour = active exfiltration; SecurEnvoy failure + IIS auth failure = MFA and application targeted simultaneously
+C4. Kill chain assembly: if surface findings chain into attack progression → escalate all linked findings to CRITICAL; document full chain in each finding's correlation field (e.g. Recon:Firewall → Delivery:IIS → Exploitation:IIS → Persistence:Windows → C2:Firewall → Actions:SFTP)
+C5. ESET detection with no other surface signal → malware stopped before further execution; still HIGH (confirmed attack reached endpoint; check Windows event logs for 4688 parent process)
+C6. Pure/iLO event + VM snapshot event in same window → ransomware staging across hardware and hypervisor layers = CRITICAL
+
+====================================================================
+POST-SWEEP OUTPUT
+====================================================================
+
+Write findings-json for each surface IMMEDIATELY after completing it (not at the end). This preserves output if session is interrupted mid-hunt.
+
+COMPLETION GATE (run BEFORE writing any output file): verify the findings-json holds at least one object for EVERY surface tag you could reach this run — iis, app, rdp, azure, linux, sftp, firewall (+ switch/lb if those devices logged), db, edr, mfa, virt, hw — on each GL where that surface exists. A missing tag means you SKIPPED that surface: go back and hunt it NOW. Do NOT close a skipped surface by labelling it REVIEW (REVIEW is ONLY for a surface whose MCP genuinely failed per HARD RULE c, after the REST fallback also failed). Azure and IIS getting deep treatment does NOT excuse a missing Windows / Linux / SFTP / Network / DB / EDR / MFA / Virt / HW finding. Only once every reachable surface has a finding do you write the files.
+
+After all surfaces + correlation, write:
+(A) reports-noskill\daily-latest.md — four sections ## AZ-GL / ## PROD-GL / ## DEV-GL / ## OP-GL; one-line coverage summary then bullet findings per section; no other ## headers; complete ```findings-json [...]``` block appended at end.
+(B) reports-noskill\coverage-gaps.json — JSON array of ONLY the surfaces whose MCP calls genuinely FAILED this run (mcp-hung, per HARD RULE c). This is NOT a to-do list: do NOT add surfaces you merely deprioritized, ran light on, or "left for next run" — you are required to assess EVERY surface this run (a CLEAN surface still gets a CLEAN finding, it is NOT a gap). Write [] — the normal, expected case — whenever every surface was reached. A non-empty coverage-gaps.json means "MCP was down for these", nothing else.
+
+FINDINGS-JSON RULES: One object per distinct finding. Do NOT emit CLEAN findings in the findings-json block — a surface with nothing anomalous gets no entry at all (CLEAN is confirmed by absence, not by a CLEAN row). Include REVIEW for unassessed surfaces. Plain ASCII only — no smart quotes, em-dashes, curly quotes, emoji.
+
+Required keys (all mandatory):
+sev          CRITICAL | HIGH | MEDIUM | REVIEW | LOW  (never CLEAN — omit the finding entirely if nothing found)
+env          AZ-GL | PROD-GL | DEV-GL | OP-GL
+surface      iis | rdp | azure | linux | sftp | firewall | switch | lb | db | edr | mfa | virt | hw | app
+source       hostname or device from log; "cloud" if no host field applies (<=60 chars)
+finding      one-line description (<=120 chars)
+evidence     2-5 VERBATIM raw log lines copy-pasted from the Graylog message field (the actual text returned by search_logs_relative/get_surrounding_logs), each prefixed with its timestamp. Do NOT paraphrase or summarize — paste the real message field content. After the raw lines, add a one-line summary of key totals (counts, countries, etc.). No speculation. Raw lines first, summary last.
+mitre        MANDATORY T-code(s)
+tactic       MANDATORY TA-code + name
+killchain    MANDATORY: Reconnaissance | Weaponization | Delivery | Exploitation | Installation | C2 | Actions
+verdict      TP | FP | REVIEW
+confidence   1-5 integer: 5=confirmed by raw log, 4=strong anomaly, 3=probable, 2=aggregate only, 1=speculative
+action       what SOC should do right now - concrete, sequenced containment/response steps (<=200 chars)
+detail       WHY this severity tier (and why NOT a higher or lower tier) + how it was detected + the assessment. Analyst-handoff grade for CRITICAL/HIGH. (<=700 chars)
+correlation  "standalone" or cross-surface link description
+query        Graylog Lucene search string only — paste into search bar as-is; no MCP parameters, no pipe chars, no rangeSeconds (e.g. streamId:69837caf557da7352164b45c AND Status:401)
+investigate  the paste-ready CORRELATION / pivot query to run next (and which surface to pivot to)
+
+ANALYST-HANDOFF (every CRITICAL/HIGH finding must be self-sufficient for the next analyst, no extra context needed): detail = why THIS severity and why not higher/lower; evidence = 2-5 VERBATIM raw Graylog message lines copy-pasted exactly as returned by search_logs_relative (each on its own line, prefixed with timestamp), then a one-line count summary — do NOT paraphrase; query = the exact paste-ready Graylog query that produced the finding; investigate = the paste-ready correlation/pivot query the next analyst runs (e.g. the SUCCESS-check or the cross-surface/entity query). An analyst who never saw the hunt must be able to continue from the report alone.

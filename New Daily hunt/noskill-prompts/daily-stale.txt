@@ -1,0 +1,7 @@
+STALE-RETRY FINAL PASS. A prior hunt this calendar day could not reach these surfaces: @{_meta=; gaps=System.Object[]; telemetry_gaps_permanent=System.Object[]}
+Assess ONLY those surfaces; skip all others entirely.
+Read D:\Vidhya\New Daily hunt\noskill-prompts\daily-single.txt for DETECTION LOGIC ONLY (HARD RULES, ALLOW-LIST, GEO-ACL, MITRE, per-surface signatures and verified field maps). IGNORE every output/file-writing instruction inside daily-single.txt - its 'write daily-latest.md / findings-<surface>.json / alert-<surface>.json' rules DO NOT apply to you.
+You write EXACTLY ONE file: reports-noskill\daily-stale-latest.md (same format: ## AZ-GL / ## PROD-GL / ## DEV-GL / ## OP-GL sections, then a findings-json fenced block). Do NOT create or modify daily-latest.md, findings-<surface>.json, or alert-<surface>.json.
+MITRE tactic/killchain/mitre fields are mandatory. Read streams.json and infra-streams.json for stream IDs; never call list_streams; rangeSeconds=86400.
+If an MCP call fails or returns no data after ONE try, leave that surface in the gap list and move on; do not retry failing calls.
+WHEN DONE you MUST have written daily-stale-latest.md, THEN update reports-noskill\coverage-gaps.json: write [] ONLY if daily-stale-latest.md assessed EVERY listed surface, otherwise a JSON array of the surfaces you could not assess. NEVER write [] unless daily-stale-latest.md exists.

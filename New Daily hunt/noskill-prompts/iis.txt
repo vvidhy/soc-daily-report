@@ -1,0 +1,89 @@
+Run a NOSKILL IIS web-attack and anomaly hunt for the last 24 hours. Hunt directly via the Graylog MCP tools only — do NOT invoke any skill.
+
+SCOPE: OP-GL, PROD-GL, AZ-GL (3 environments). This hunt owns ALL IIS_ streams across those 3 GLs — including AZ-GL (IIS_FOIA, IIS_Platformgov, IIS_CGCE_vintasoft) and OP-GL Opexus portals (IIS_PROD, IIS_UAT). The app hunt does NOT query these streams. Do NOT query DEV-GL — emit ## DEV-GL as "Covered by the dev hunt." Base filter: filebeat_log_file_path:*inetpub*
+
+FIELD SCHEMA (exact names): Client_ip, URI_Stream (path), URI_Query, Status, Method, UserAgent, Referer, Time_Taken, Client_Bytes, Server_Bytes, Port, Host, Version, Username, iisSite, Server_ip, source. GEO: Geo_Country, Geo_ip, Origin_ip (ASN/org/country).
+
+PARSER REALITY: OP-GL fields fully parsed — use named fields and geo. PROD-GL and AZ-GL fields are frequently null/shifted — hunt primarily on the raw message field (search `message:*token*`). On PROD/AZ a named-field zero is NOT a clean result; always cross-check with raw message. Real client IP on PROD/AZ is in the first X-Forwarded-For token inside message, not c-ip (which is the 10.x KEMP LB).
+
+STEP 0 — PRE-COMPUTED (read file, skip all STEP 0 queries):
+Read the file reports-noskill\iis-preparse.json. This was computed via REST before this hunt (0 tokens spent). It contains:
+- envs["OP-GL"].anomalies[] — per-IP anomaly list (type, ip, count) for OP-GL. Field quality: parsed.
+- envs["PROD-GL"].anomalies[], envs["AZ-GL"].anomalies[] — best-effort (partial fields). Use as leads only; validate via raw message.
+- envs[*].allowlisted[] — Nessus/Cato/Zscaler IPs already filtered out. Do NOT re-investigate these.
+- envs[*].bucket_counts — totals per status bucket for context.
+- envs[*].active_servers[] — list of active IIS servers in that env.
+- envs[*].coverage_note — per-env instruction.
+If the file is missing or generated > 6 hours ago, run STEP 0 manually: aggregate Status by Client_ip per env (5 queries) and apply the same thresholds (401/403 burst >= 5, 404 count >= 50, 5xx >= 10, external 200 >= 20). Mark missing/stale pre-parse as a REVIEW coverage-gap finding.
+
+STEP 1 — URI DRILL (main work, one turn per anomalous IP):
+For EACH anomaly in anomalies[] pull the URIs that IP accessed and match against the 14 attack classes. Emit findings ONLY when a URI matches a class signature. If no signature matches, the anomaly is benign — skip it.
+
+HOW TO DRILL BY ENV (do not mix these up — using the wrong method wastes a turn getting 0 results):
+• OP-GL (field_quality: parsed): use named fields directly. Query: `filebeat_log_file_path:*inetpub* AND Client_ip:<ip>` then aggregate URI_Stream. You can also filter by Status for precision.
+• PROD-GL / AZ-GL (field_quality: partial, parsed_from: raw_message): DO NOT query Status, Client_ip, or URI_Stream — they return null. Go directly to raw message: `filebeat_log_file_path:*inetpub* AND message:*<ip>*` — the URI is the 5th space-delimited field (cs-uri-stem) in the log line. Extract the top distinct URI paths from the returned messages. If coverage_note says "raw message fetch FAILED", then search: `filebeat_log_file_path:*inetpub*` with limit 20 and read the message format to determine the correct field positions before drilling.
+
+STEP 2 — GLOBAL CHECKS (pre-computed in iis-preparse.json step2 — read and report, minimal live queries):
+(i)  METHODS + SCANNER UAs + VOLUMETRIC (0 live queries if step2 present):
+     Read step2 section from iis-preparse.json for each env.
+     - step2.methods: if dangerous_count > 0 → emit MEDIUM finding with method list + counts. If note says CLEAN → skip.
+     - step2.scanner_uas: if flagged_count > 0 → emit MEDIUM finding with flagged UA(s) + counts. If note says CLEAN → skip.
+     - step2.volumetric_top: flag any IP not already in anomalies[] with > 500 total_requests (cross-check allow-list).
+     If step2 key missing from preparse.json: run 1 live query per env (aggregate Method on OP-GL; message count on PROD/AZ).
+(ii) CROSS-FIELD (OP-GL only, 2 live queries): aggregate Host by Client_ip — flag any IP hitting > 3 distinct Host values (vhost scanning). Aggregate Username by Client_ip — flag any IP with > 5 distinct Usernames (credential stuffing).
+(iii) OFF-HOURS (OP-GL, 1 live query): external IPs with Status 200 or 206 between 22:00-06:00. Use offhours_note from step2 as the query if step2 present.
+
+STEP 3 — USER BEHAVIOUR (run after STEP 2, OP-GL + PROD-GL only; AZ-GL if geo field present):
+This replaces the former separate app and app-pt hunts — all application streams are IIS logs (inetpub).
+
+(i)  GEO-ACL per product (one aggregate by Geo_Country per stream group):
+     - eCase/Platform, FOIA, PAL/ATIP (Opexus): allow US + US territories + Colombia + Ireland + Poland + UK + Singapore + Canada + Germany + Australia + Italy + Japan + HK + India + Romania + Mexico + Netherlands + Israel. Any other country = HIGH minimum.
+     - UT Prod, UAT eCase: United States + six US territories ONLY — any other country = HIGH.
+     - EPA Prod PAL: worldwide, no geo restriction — skip geo check for these streams.
+     - OP-GL: Geo_Country field fully parsed — aggregate directly.
+     - PROD-GL / AZ-GL / DEV-GL: Geo_Country is absent from parsed fields. DO NOT skip — instead search the raw message field for country tokens: search message:*"country"* to check if geo data is embedded in raw log lines. If raw message contains country strings, extract and apply the same ACL rules above. If raw message also has no country data, THEN emit REVIEW "geo-ACL skipped — Geo_Country absent and not in raw message" with query: filebeat_log_file_path:*inetpub* AND _exists_:Geo_Country
+
+(ii) AUTHENTICATED USER EXFIL: aggregate export / download / report / bulk-api URIs by Username (OP-GL: Username field; PROD/AZ: extract from raw message if present). Flag: one Username with abnormally high Server_Bytes or row counts; non-employee domain username on export paths; automated UA on export paths.
+
+(iii) ADMIN ACTIONS: aggregate new-user / role-grant / password-reset / MFA-reset URI patterns by Username. Flag: admin action by unexpected username, bulk user creation, admin action outside 06:00-22:00 IST.
+
+(iv) AUTH ANOMALIES BY USERNAME (from app-pt): aggregate 401/403 by Username (not IP — IP-level brute-force is already in STEP 2). OP-GL: use Username field directly. PROD/AZ: extract username token from raw message. Flag: one Username with repeated 401s = account under targeted attack; valid Username hitting 403 on sensitive paths (admin/export/config) = privilege escalation attempt; any non-employee domain username (external or test account) authenticating at all.
+
+(v)  IMPOSSIBLE TRAVEL (from app): one Username appearing in 2+ distinct Geo_Country values OR 2+ distinct external ASN IPs within the 24h window. OP-GL: aggregate Geo_Country by Username, then flag any Username with count > 1. PROD/AZ: Geo_Country may be absent from parsed fields — DO NOT skip. First try to extract username + country from raw message (message:*country* or message:*Geo*). If raw message also carries no geo data, then emit REVIEW "impossible travel skipped — no geo in parsed fields or raw message" with query: filebeat_log_file_path:*inetpub* AND _exists_:Username. A single Username from 2 countries = HIGH minimum; from 3+ = CRITICAL.
+
+TURN BUDGET (strict): 36 turns max. STEP 0 = 1 turn (read file). STEP 1 = 1-2 turns per anomaly × max 3 anomalies per env (preparse caps list). STEP 2 = ~3 turns (cross-field + off-hours only; methods/UAs/volumetric read from preparse). STEP 3 = ~5 turns (geo-ACL first, then exfil, then remaining if turns allow). At turn 30: stop new queries and write report. Any unchecked item = REVIEW coverage-gap finding naming what was skipped and why.
+
+14 ATTACK CLASSES (match STEP 1 URI drills against these; on PROD/AZ search message field):
+1 SQLi: union select, sleep(, benchmark(, waitfor delay, xp_cmdshell, information_schema, or 1=1, char(, convert(, cast(
+2 XSS: script tag, onerror, onload, onmouseover, javascript:, svg onload, document.cookie, alert(
+3 RCE/CMD: cmd.exe, powershell, /bin/sh, /bin/bash, ping -, nslookup, certutil, bitsadmin, whoami
+4 Path Traversal/LFI: ../ sequences (raw/encoded/double-encoded), etc/passwd, win.ini, web.config, /proc/self, php://filter, remote http/https in parameter
+5 SSRF/Metadata: 169.254.169.254, metadata.google, latest/meta-data, file://, gopher://, dict://, localhost or 127.0.0.1 in URL param
+6 Log4Shell/Deserialize/Template: jndi:ldap, jndi:rmi, jndi:dns, ${, java deserialization markers, XXE doctype/entity, Spring4Shell class.module
+7 Webshell: POST/GET to .aspx/.ashx/.asmx/.asp/.php/.jsp in upload/writable paths; known names (cmd.aspx, shell.aspx, up.aspx, antsword, behinder, china chopper eval markers); large Client_Bytes POST to script extension
+8 Auth Attacks: 401 burst from one IP = brute force; one IP + many distinct Usernames = credential stuffing; 403 repeated = forbidden-resource probing
+9 Enumeration: external IP with high-count 404 across distinct URIs
+10 Scanner UAs: python-requests, Go-http-client, curl, wget, libwww, fasthttp, masscan, zgrab, nuclei, nikto, sqlmap, acunetix, nmap, WPScan, CensysInspect, Shodan, InternetMeasurement, Expanse
+11 CMS/CVE Paths: wp-login.php, xmlrpc.php, .env, .git/, actuator, phpunit/eval-stdin.php, cgi-bin, HNAP1, struts action, /config/ses.php
+12 Dangerous Methods: PUT, DELETE, TRACE, TRACK, CONNECT, PROPFIND, MKCOL, MOVE, COPY (aggregate Method field)
+13 Exfil/Data Theft: very large Server_Bytes responses, high cumulative download per IP/Username, repeated hits to export/report/download/attachment endpoints
+14 Beaconing/C2: one IP hitting same URI at regular cadence; very long or base64/hex-looking URI_Query
+
+ALLOW-LIST (already filtered in pre-parse; re-confirm if you encounter them):
+Nessus VA: 10.101.100.160, 10.150.116.93, 10.250.100.77, 10.220.100.199 — cap at REVIEW, confirm authorization.
+Cato egress: 140.82.202.196, 199.27.40.187, 123.253.153.138 — cap at MEDIUM.
+Zscaler: 136.226.* or 165.225.* or Origin_ip contains "Zscaler" — benign proxy egress.
+
+REPORTING RULE:
+- Genuine attack signatures matched in STEP 1 → individual findings (with IP, URI, Status, Geo, timestamp).
+- Generic scanner noise (high-404 / scanner-UA, no attack-class match) → ONE rolled-up LOW finding per env.
+- Coverage gaps / unfinished drills → REVIEW finding. The `query` field MUST contain the exact paste-ready Graylog query an analyst can copy into the search bar. The `action` field MUST say "Run manually in [GL]: [query]". Never emit a REVIEW without a runnable query — a REVIEW with no query is useless.
+  Examples of REVIEW queries:
+    Skipped STEP 1 IP drill (OP-GL):   filebeat_log_file_path:*inetpub* AND Client_ip:<ip>
+    Skipped STEP 1 IP drill (PROD/AZ): filebeat_log_file_path:*inetpub* AND message:*<ip>*
+    Skipped STEP 2 scanner-UA check:   filebeat_log_file_path:*inetpub* AND message:*python-requests* OR message:*sqlmap*
+    Skipped STEP 3 geo-ACL (OP-GL):    filebeat_log_file_path:*inetpub* AND Geo_Country:* AND NOT Geo_Country:(US OR Canada OR ...)
+    Skipped STEP 3 impossible-travel:  filebeat_log_file_path:*inetpub* AND _exists_:Username AND _exists_:Geo_Country
+- Include a per-env one-line coverage summary (e.g. "401: 3 IPs checked, 1 finding; 404: 2 IPs checked, LOW; STEP 2: complete").
+
+OUTPUT: Save markdown to reports-noskill\iis-latest.md with exactly 4 top-level sections: ## AZ-GL, ## PROD-GL, ## DEV-GL, ## OP-GL. Then append a ```findings-json block containing a valid JSON array. Keys per finding: sev (HIGH|MEDIUM|REVIEW|LOW|CLEAN), env, surface (always "iis"), finding (<=120 chars), evidence (<=100 chars — timestamps/IPs/counts/country), mitre (T-code list), tactic (TA-code), killchain (exactly one: Reconnaissance|Weaponization|Delivery|Exploitation|Installation|C2|Actions), action (<=100 chars), query (exact Graylog query you ran), investigate (next-step pivot query), detail (WHY this severity tier and why NOT higher or lower + how it was detected + analyst-handoff assessment; <=700 chars). Plain ASCII only in JSON strings — no smart quotes, em-dashes, or emoji.

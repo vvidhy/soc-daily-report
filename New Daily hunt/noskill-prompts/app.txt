@@ -1,0 +1,27 @@
+Run a NOSKILL APP hunt (application-layer and crown-jewel monitoring) for the last 24 hours across AZ-GL and PROD-GL. Hunt directly via the Graylog MCP tools only — do NOT invoke any skill.
+
+NOTE ON SCOPE: The raw IIS attack-signature checks (scanner UAs, SQLi/XSS/RCE payloads, brute-force by IP, 5xx spikes) are already covered by the separate iis hunt on the same streams. This hunt covers ONLY what the iis hunt cannot: authenticated user behaviour, per-product geo-ACL enforcement, admin/privilege actions, and exfil detection. Do NOT re-run generic status-bucket or attack-signature queries — that is redundant token spend.
+
+THIS HUNT IS RETIRED (2026-06-22). All streams previously in this category (IIS_Exolution, IIS_BPMS, IIS_PROD_Canada_Opexus, IIS_OpexusPT and all IIS_ streams) are confirmed inetpub-routed IIS logs and are now owned exclusively by the iis hunt. User-behavior checks (geo-ACL, exfil, admin actions) are now STEP 3 in iis.txt. Do NOT run this hunt — it will produce duplicate findings. If this prompt is called, emit a single REVIEW finding: "app hunt retired 2026-06-22 — coverage moved to iis hunt STEP 3" and stop.
+
+WHAT TO HUNT (4 checks, in order — one aggregate per stream max):
+
+1. GEO-ACL: Aggregate by country/geoip field. Flag any country outside the per-product allow-list below. If the stream has no geo field, emit REVIEW "geo field absent — verify in azure hunt." Do NOT fabricate a country.
+   - eCase/Platform, FOIA, PAL/ATIP (Opexus): US + US territories + Colombia + Ireland + Poland + UK + Singapore + Canada + Germany + Australia + Italy + Japan + HK + India + Romania + Mexico + Netherlands + Israel
+   - UT Prod and UAT eCase: United States + six US territories ONLY (any other country = HIGH minimum)
+   - EPA Prod PAL: worldwide, no geo restriction — skip geo check, rely on behavioral signals only
+
+2. AUTHENTICATED USER EXFIL: Aggregate export / download / report-generation / bulk-api endpoints by Username. Flag: one user with abnormally high response bytes or row counts vs. the stream baseline; any non-employee domain Username (external or test account) hitting export endpoints; UserAgent that looks automated (no browser UA) hitting export paths. Do NOT flag normal interactive browsing.
+
+3. ADMIN AND PRIVILEGE: Search for admin-console access, role or permission grants, new user or new tenant creation, password or MFA resets initiated in-app. Aggregate by Username. Flag any admin action by a non-admin Username, any bulk user creation, any MFA reset outside business hours.
+
+4. AUTHENTICATED SESSION ANOMALIES: One Username authenticating from 2+ distinct countries or 2+ distinct ASN IPs within 24h (impossible travel / shared credentials). Only check if the stream carries a username + country/IP — skip if fields absent.
+
+ALLOW-LIST (apply before raising findings):
+- Cato egress IPs 140.82.202.196, 199.27.40.187, 123.253.153.138 — cap at MEDIUM, tag Cato egress.
+- Nessus/Tenable scanners (MTNESSUS01 10.102.100.199, LDPTNESSUS01 10.101.100.160, LDNESUS01 10.250.100.77, AZHNESSUS01 10.220.100.199) — cap at LOW, tag sanctioned scanner. Escalate to HIGH if scanner performs data export, admin action, or lateral move.
+- Internal RFC-1918 IPs are NOT automatically safe.
+
+TURN BUDGET: 20 turns max. Each of the 4 checks above = 1 aggregate per stream. Prioritise crown-jewel streams first: any Platform stream, FOIA, Opexus, vintasoft. If you cannot assess a stream promptly, emit REVIEW "NOT ASSESSED — coverage gap, re-run manually" and move on. Never inherit a prior-day clean verdict.
+
+OUTPUT: Use the Write tool to save markdown to reports-noskill\app-latest.md — printing instead of writing is a failure. Structure with exactly 4 sections: ## AZ-GL, ## PROD-GL, ## DEV-GL, ## OP-GL. List each stream checked with result. Append a ```findings-json block: valid JSON array, one object per finding. Include CLEAN per env if nothing fired. Keys: sev (HIGH|MEDIUM|REVIEW|LOW|CLEAN), env, surface (always "app"), finding (<=120 chars), evidence (<=100 chars), mitre, tactic, killchain (one of Reconnaissance|Weaponization|Delivery|Exploitation|Installation|C2|Actions), action (<=100 chars), query, investigate. Plain ASCII only — no smart quotes, em-dashes, or emoji.

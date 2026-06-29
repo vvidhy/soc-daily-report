@@ -1,0 +1,44 @@
+# Retry-before-report pass for the no-skill pipeline.
+# After the first pass of the 8 surface hunts, this checks which surface reports are
+# STALE/MISSING (not written this run, or carrying no findings-json) and re-runs each
+# ONCE via run-noskill-hunt.ps1, so a transiently-stuck hunt does not leave a gap in
+# the report. Correlation is NOT retried here - it runs downstream (after prep + gate)
+# and is derived from these surface findings. Any surface still stale after the single
+# retry ships with the STALE banner (generate-pdf-noskill.ps1), the last-resort safeguard.
+#
+# LOGGING: writes ONLY to stdout - the caller (daily-report-noskill.cmd) redirects this
+# whole step with `>> daily.log 2>&1`. Do NOT Add-Content to daily.log (double-writer
+# IOException - the 2026-06-02 bug). The nested run-noskill-hunt.ps1 inherits this stdout.
+$ErrorActionPreference='Continue'
+$proj='C:\Users\VidhyaV\soc-monitor'
+$dir="$proj\reports-noskill"
+
+$flagP="$proj\logs-noskill\run-start.flag"
+if(-not (Test-Path $flagP)){ Write-Output "retry-stale (noskill): no run-start.flag - skipping retry"; exit 0 }
+$flag=(Get-Item $flagP).LastWriteTime
+
+# Surface hunts only (report basenames). correlation is handled after prep/gate.
+$surfaces='iis','rdp','azure','linux','sftp','app','network','db','infra'
+
+function IsStale([string]$s){
+  $fp="$dir\$s-latest.md"
+  if(-not (Test-Path $fp)){ return $true }
+  $it=Get-Item $fp
+  if($it.LastWriteTime -lt $flag){ return $true }
+  if(-not (Select-String -Path $fp -Pattern 'findings-json' -Quiet)){ return $true }
+  return $false
+}
+
+$stale = @($surfaces | Where-Object { IsStale $_ })
+if($stale.Count -eq 0){ Write-Output "retry-stale (noskill): all 9 surface reports fresh - no retry needed"; exit 0 }
+
+Write-Output "retry-stale (noskill): stale/missing after first pass -> $($stale -join ', ') ; re-running each once"
+foreach($s in $stale){
+  Write-Output "retry-stale (noskill): re-running [$s] (1 retry)"
+  & powershell -NoProfile -ExecutionPolicy Bypass -File "$proj\run-noskill-hunt.ps1" -Key $s
+}
+
+$still = @($surfaces | Where-Object { IsStale $_ })
+if($still.Count){ Write-Output "retry-stale (noskill): STILL stale after 1 retry -> $($still -join ', ') (will ship with STALE banner)" }
+else { Write-Output "retry-stale (noskill): all surfaces fresh after retry" }
+exit 0

@@ -1,0 +1,1 @@
+type:utm AND (crlevel:critical OR crlevel:high OR severity:critical)

@@ -1,0 +1,109 @@
+Run the HOURLY LIVE SOC hunt across all 4 Graylogs. No Skill tool, no subagents — call mcp__AZ-GL__ / mcp__PROD-GL__ / mcp__DEV-GL__ / mcp__OP-GL__ tools directly.
+
+MISSION: You are a senior SOC analyst. Your job is to examine what is actually in the logs right now and determine what is suspicious — not to run a pre-defined checklist of attack signatures. Novel attacks, behavioral anomalies, and unusual combinations are found by looking at the data, not by running fixed queries. Think like an attacker and look for what does not fit.
+
+WINDOW: rangeSeconds 3900 (65 min, 5-min overlap so nothing falls between hourly runs).
+
+=== HARD RULES ===
+(a) AI-DRIVEN DETECTION. Do NOT use pre-defined attack query patterns as your primary search. Instead: aggregate key fields → sample recent raw events → reason over the full picture → issue your own targeted follow-up queries based on what you observe. You decide what is suspicious. The data tells you where to look.
+(b) HUNT RAW message FIELD, NO STREAM SCOPING ASSUMED. Parsed/named fields may be incomplete. Query All-messages (no streamId filter where needed) with field filters AND raw message phrases. A named-field zero is NOT clean until the raw message has also been checked. When a parsed field and message disagree, trust the message. Never match a bare number as full-text ("4625" matches GUIDs/URLs) — use parsed field filters (winlogbeat_winlog_event_id:4625) or precise phrases.
+(c) RESILIENCE. If an MCP call fails, retry once. DEV-GL (siem.casepoint.in) is TLS-flaky and intermittently drops connections though the GL is UP — retry almost always succeeds. If retry also fails, fall back to REST via graylog-rest-query.ps1 (write the Lucene query to a temp file, run the helper). Only if REST also fails is the GL genuinely down → emit sev=REVIEW finding "gl-unreachable: <GL> — MCP+REST both failed". NEVER report a reachable surface clean because one MCP call hiccuped.
+(d) EVIDENCE REQUIRED. Never emit a finding without evidence from actual Graylog data (real counts, IPs, usernames, raw log values). Narratives without numbers are not findings.
+(e) IMMEDIATE WRITE. For CRITICAL/HIGH/MEDIUM findings: write alert-{surface}-{HHmmss}.json to reports-live\ IMMEDIATELY after confirming — one file per finding — so delivery fires even if the run is later interrupted.
+    Evidence field MUST contain actual log data in this compact format (pipe-separated, max 3 representative log lines):
+    "GL:<graylog_name> | q:<lucene_query_used> | <field>:<value> | <field>:<value> | count:<n>"
+(f) COVER ALL 4 GLs. AZ-GL, PROD-GL, DEV-GL, OP-GL. Every GL gets its own assessment pass. Never skip one.
+
+=== PRE-FLIGHT ===
+Read streams.json once for stream IDs (do NOT call list_streams — the cache is current).
+Do NOT read detections.json or depth-modules — you are not running pre-defined signatures.
+
+=== ALLOW-LIST ===
+- Cato egress: 140.82.202.196 / 199.27.40.187 / 123.253.153.138 → cap at MEDIUM, never auto-escalate
+- Nessus/Tenable: 10.102.100.199 / 10.101.100.160 / 10.250.100.77 / 10.220.100.199 → cap at LOW
+- casepoint.com legacy Authenticated SMTP for ~8 service accounts = LEGIT (SMTP-success=compromise applies to casepoint.in ONLY)
+- Linux noise strings in message field: jndi, ceurufrd → note but do not flag unless accompanied by exploit chain
+- Azure result codes 70043/70044/50173/50140 → routine, suppress
+
+GEO-ACL (IIS/Azure/APP): Allowed geos = US+territories, Colombia, Ireland, Poland, UK, Singapore, Canada, Germany, Australia, Italy, Japan, HK, India, Romania, Mexico, Netherlands, Israel. Traffic from outside this list = MEDIUM minimum [T1078]. UT Prod/UAT eCase = US only.
+
+=== DETECTION APPROACH — AI-DRIVEN ===
+
+For each GL, work through its active streams systematically. For each stream:
+
+STEP 1 — AGGREGATE PICTURE
+Call aggregate_logs on the most meaningful fields for that stream type. Collect distributions:
+  - Volume by top entities (source IPs, users, hostnames, event types)
+  - Error/failure rates vs success rates
+  - Status code distributions
+  - Geographic distribution where available
+  - Top destinations, ports, services
+Do not specify what counts are "too high" — you observe the actual numbers and judge what is disproportionate relative to peers in the same window.
+
+STEP 2 — SAMPLE RECENT EVENTS
+Call search_logs_relative for that stream (last 65 min, no restrictive filter — use stream_id but no attack-specific query). Fetch 20-50 recent events. Read the actual log content:
+  - What fields are present and populated?
+  - What values appear in free-text fields (message, URI, command lines)?
+  - What combinations of field values appear across multiple events?
+  - What looks structurally different from what you would expect in normal operations?
+
+STEP 3 — SECURITY REASONING (this is the core of the hunt)
+Think as a security analyst examining real evidence:
+  - What is statistically abnormal in this window? (volume spikes, unusual ratios, skewed distributions)
+  - What entities appear for the first time — IPs, users, hostnames, process names — that have no prior presence?
+  - What sequences across events suggest a campaign, not random noise? (probe → auth → success → command)
+  - What combinations are suspicious even if each element alone seems fine? (legitimate tool + unusual path + off-hours + new IP)
+  - What would an attacker doing reconnaissance, initial access, persistence, lateral movement, or exfiltration look like in these specific log types?
+  - What is absent that should be present? (e.g., a service that usually generates traffic went silent)
+  - Are there slow-and-low patterns — low rate, spread across many minutes, that would not trigger a threshold?
+
+You are not looking for what the prompt told you to look for. You are looking for what does not belong.
+
+STEP 4 — TARGETED FOLLOW-UP QUERIES
+Based on what you observed in steps 1-3, issue your own specific follow-up queries to confirm or dismiss what you noticed. Examples of what you might decide to do:
+  - A specific IP dominated source counts → aggregate that IP's events by result code to check failure vs success ratio
+  - An unusual URI path appeared in a sample → query message containing that path to count occurrences and check HTTP status codes
+  - A username appeared in an unexpected context → count that user's events by event type across the window
+  - A new hostname appeared → pull a sample of its events to understand what it is
+  - A command-line fragment caught your eye → count occurrences and check parent processes
+You decide what to investigate further. The prompt does not enumerate the drill-down list.
+
+STEP 5 — ENTITY CROSS-STREAM CORRELATION
+After completing per-stream analysis, look for shared entities across findings:
+  - Same IP address appearing in findings from 2+ different streams or GLs → escalate all linked findings to HIGH minimum
+  - Same username appearing in Windows + IIS + Azure in same window → potential account compromise chain
+  - Same source IP in both network/firewall deny logs AND application access logs → external attacker probing and attempting access
+  - Lateral movement chain: external probe → auth success → Windows logon → service install within same window
+
+STEP 6 — THREAT INTELLIGENCE (for any confirmed exploitation indicator)
+For any external client IP with confirmed exploitation indicators (not just probing — actual attack token confirmed in URI or message, or auth bypass):
+Run: powershell -File ti-lookup.ps1 -Ip <IP>
+Put the TI verdict in the finding's "ti" field. TI-malicious + HTTP 2xx = CRITICAL. TI-malicious + blocked attempt = HIGH. Clean/no-data TI never downgrades a confirmed exploit finding.
+
+=== MITRE ATT&CK (mandatory on every finding, never blank) ===
+Tag every finding with:
+  - tactic: TA-code + name (e.g. TA0001 Initial Access)
+  - mitre: T-code list (e.g. T1190, T1078)
+  - killchain: Reconnaissance | Weaponization | Delivery | Exploitation | Installation | C2 | Actions
+
+=== OUTPUT — PHASE 3 ===
+Write reports-live\live-latest.md. End the file with ONE fenced block:
+```findings-json
+[ {
+  sev, env, surface, finding, evidence, mitre, tactic, killchain, verdict, confidence, action, detail, correlation, query, investigate, anchor_ip, ti,
+  IIS/APP  : client_ip, host, uri_stem, uri_query, http_status
+  WINDOWS  : event_id, win_host, win_user, logon_type, src_ip
+  AZURE    : upn, azure_ip, result_code, app_name, client_app, geo_country
+  LINUX    : linux_user, linux_src_ip, linux_service
+  SFTP     : client_ip, sftp_user, sftp_size_mb
+  NETWORK  : src_ip, dst_ip, dst_port, net_action, policy, ips_severity
+  EDR/ESET : edr_host, edr_detect, edr_process
+}, ... ]
+```
+Surface-specific fields: pull from actual Graylog log field values. Set null when not applicable.
+sev: CRITICAL | HIGH | MEDIUM | REVIEW | LOW
+Do NOT emit CLEAN findings in the output array. A surface that is assessed and found quiet gets NO entry — silence is shown by absence, not by a CLEAN row.
+Every CRITICAL/HIGH/MEDIUM also gets its own alert-{surface}-{HHmmss}.json (rule e).
+
+For every HIGH or CRITICAL finding, print one stdout line:
+  ESCALATE: <env> | <host_or_user_or_ip> | <reason> | <anchor>

@@ -1,0 +1,59 @@
+{
+  "module": "dcsync-replication",
+  "version": "1.0",
+  "technique": "DCSync - directory replication credential theft",
+  "mitre": ["T1003.006"],
+  "tactic": "TA0006 Credential Access",
+  "surface": "rdp",
+  "applies_to_gl": ["AZ-GL", "PROD-GL", "DEV-GL", "OP-GL"],
+  "trigger": {
+    "from_breadth": "4662 with the Replicating-Directory-Changes GUID seen (Surface-2 W4 mandatory), OR run unconditionally each pass",
+    "entity": "SubjectUserName"
+  },
+  "telemetry_required": ["winlogbeat_winlog_event_id:4662 + winlogbeat_winlog_channel:Security + event_data with the replication GUID + SubjectUserName (CONFIRMED flowing all 4 GLs)"],
+  "telemetry_gap_behavior": "4662 is collected on all 4 GLs so this module is fully live. The downstream actor-sourcing is partially blind: 4768/4769 are DROPPED at collection, so DO NOT expect Kerberos to source the actor - pivot to 4624 Type 3/10 + 4776 NTLM + FortiGate instead, and note the Kerberos gap.",
+  "inputs": { "window_seconds": 86400 },
+  "method": [
+    {
+      "step": 1,
+      "goal": "Find directory-replication-changes requests",
+      "query": "winlogbeat_winlog_event_id:4662 AND winlogbeat_winlog_channel:Security AND \"1131f6aa-9c07-11d1-f79f-00c04fc2dcd2\"",
+      "compute": "capture SubjectUserName, winlogbeat_host_name, timestamp for each hit"
+    },
+    {
+      "step": 2,
+      "goal": "Classify the requesting account (this is the whole detection)",
+      "compute": "is SubjectUserName a Domain Controller machine account (ends with $ and in the DC allow-list) OR the Entra/AAD Connect sync account (MSOL_* / AAD_*)?",
+      "decision_input": "DC machine account or known sync account = EXPECTED replication (benign). ANY other account requesting replication-changes = DCSync"
+    },
+    {
+      "step": 3,
+      "goal": "Source the actor behind an anomalous account",
+      "query": "winlogbeat_winlog_event_data_TargetUserName:<account> AND winlogbeat_winlog_event_id:(4624 4776) AND winlogbeat_winlog_channel:Security",
+      "compute": "recent 4624 logon source IP + LogonType (3/10), 4776 NTLM validation host; correlate to an RDP session or external IP",
+      "note": "Kerberos 4768/4769 are dropped - cannot use TGS/TGT; this NTLM+logon pivot is the available path"
+    },
+    {
+      "step": 4,
+      "goal": "Timing / novelty",
+      "compute": "off-hours (23:00-05:00)? first-ever replication request for this account?"
+    }
+  ],
+  "decision": {
+    "CRITICAL_conf5": "replication-directory-changes requested by a NON-DC, NON-sync account = DCSync credential theft",
+    "benign": "DC machine account or known Entra Connect sync account = normal AD replication (no finding)"
+  },
+  "false_positive_checks": [
+    "DC machine accounts (maintain a DC allow-list per environment)",
+    "Entra/Azure AD Connect sync account (MSOL_* / AAD_*) - has legitimate replication rights",
+    "Azure AD Connect Health agent"
+  ],
+  "evidence_capture": ["subject_user","host","timestamp","is_dc_or_sync_account","correlated_source_ip","correlated_logon_type","off_hours"],
+  "output_findings_json": {
+    "surface": "rdp",
+    "mitre": "T1003.006",
+    "tactic": "TA0006 Credential Access",
+    "killchain": "Actions on Objectives",
+    "query_template": "winlogbeat_winlog_event_id:4662 AND winlogbeat_winlog_channel:Security AND \"1131f6aa-9c07-11d1-f79f-00c04fc2dcd2\""
+  }
+}

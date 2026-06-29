@@ -1,0 +1,20 @@
+[
+  { "key": "sweep",        "model": "sonnet", "prompt": "noskill-prompts\\sweep.txt",         "mcp": ".mcp.json",    "maxTurns": 20  },
+  { "key": "daily",        "model": "sonnet", "prompt": "noskill-prompts\\daily-single.txt",  "mcp": ".mcp.json",       "maxTurns": 200 },
+  { "key": "daily-stale",  "model": "sonnet", "prompt": "noskill-prompts\\daily-stale.txt",   "mcp": ".mcp.json",       "maxTurns": 50  },
+  { "key": "live",         "model": "sonnet", "prompt": "noskill-prompts\\live.txt",          "mcp": ".mcp.json",       "maxTurns": 35  },
+  { "key": "iis",          "model": "sonnet", "prompt": "noskill-prompts\\iis.txt",           "mcp": "mcp-3gl.json",    "maxTurns": 36  },
+  { "key": "rdp",          "model": "sonnet", "prompt": "noskill-prompts\\rdp.txt",           "mcp": "mcp-3gl.json",    "maxTurns": 20  },
+  { "key": "azure",        "model": "sonnet", "prompt": "noskill-prompts\\azure.txt",         "mcp": "mcp-azprod.json", "maxTurns": 18, "fallback": true },
+  { "key": "linux",        "model": "sonnet", "prompt": "noskill-prompts\\linux.txt",         "mcp": "mcp-3gl.json",    "maxTurns": 18  },
+  { "key": "sftp",         "model": "sonnet", "prompt": "noskill-prompts\\sftp.txt",          "mcp": "mcp-3gl.json",    "maxTurns": 18  },
+  { "key": "network",      "model": "sonnet", "prompt": "noskill-prompts\\network.txt",       "mcp": "mcp-3gl.json",    "maxTurns": 20  },
+  { "key": "db",           "model": "sonnet", "prompt": "noskill-prompts\\db.txt",            "mcp": ".mcp.json",       "maxTurns": 15  },
+  { "key": "infra",        "model": "sonnet", "prompt": "noskill-prompts\\infra.txt",         "mcp": ".mcp.json",       "maxTurns": 16  },
+  { "key": "app",    "_retired": "2026-06-22 — all streams are IIS logs (inetpub); user-behavior checks folded into iis.txt STEP 3" },
+  { "key": "app-pt", "_retired": "2026-06-22 — OpexusPT confirmed IIS; all streams moved to iis category" },
+  { "key": "dev",          "model": "sonnet", "prompt": "noskill-prompts\\dev.txt",           "mcp": "mcp-dev.json",    "maxTurns": 12  },
+  { "key": "correlation",  "model": "opus",   "prompt": "noskill-prompts\\correlation.txt",   "mcp": "mcp-3gl.json",    "maxTurns": 8   },
+  { "key": "depth",        "model": "sonnet", "prompt": "noskill-prompts\\depth-pass.txt",    "mcp": "mcp-3gl.json",    "maxTurns": 15  },
+  { "key": "depth-catchup","_retired": "2026-06-22 — eliminated to meet 40% token budget; depth trimmed to 15t covering priority modules only" }
+]

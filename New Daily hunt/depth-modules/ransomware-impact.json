@@ -1,0 +1,69 @@
+{
+  "module": "ransomware-impact",
+  "version": "1.0",
+  "technique": "Ransomware / destructive impact - recovery inhibition, encryption, service stop, resource hijacking",
+  "mitre": ["T1490", "T1486", "T1489", "T1496"],
+  "tactic": "TA0040 Impact",
+  "surface": "windows",
+  "applies_to_gl": ["PROD-GL", "OP-GL", "AZ-GL", "DEV-GL"],
+  "trigger": {
+    "from_breadth": "4688 recovery-inhibition commands (vssadmin delete shadows, wmic shadowcopy delete, wbadmin delete catalog/systemstatebackup, bcdedit recoveryenabled no / bootstatuspolicy ignoreallfailures, cipher /w); OR a burst of service stops (7036/7040) hitting AV/backup/DB services; OR an ESET ransomware/encryptor detection; OR cryptominer strings (xmrig/kdevtmpfsi/kinsing). Any one of these is high-fidelity impact-stage activity.",
+    "entity": "host"
+  },
+  "telemetry_required": [
+    "winlogbeat_winlog_event_id:4688 + message (CommandLine) for recovery-inhibit commands",
+    "winlogbeat_winlog_event_id:(7036 OR 7040) for service stop/state change",
+    "ESET detection logs (ransomware/encryptor verdicts) ; Linux message for cryptominer strings"
+  ],
+  "telemetry_gap_behavior": "The actual file-encryption is BLIND without file-integrity monitoring / Sysmon - so the recovery-inhibition COMMANDS, service stops, ESET verdicts, and cryptominer strings are the highest-fidelity OBSERVABLE indicators. A shadow-copy deletion alone is near-certain ransomware staging -> treat as CRITICAL on its own; never wait for encryption you cannot see. Absent = KNOWN-GAP + recommend file-integrity monitoring.",
+  "inputs": { "host": "<computer name>", "window_seconds": 3900 },
+  "method": [
+    {
+      "step": 1,
+      "goal": "Recovery inhibition (the classic pre-encryption step)",
+      "query": "winlogbeat_winlog_event_id:4688 AND winlogbeat_winlog_channel:Security AND message:(\"vssadmin\" OR \"shadowcopy delete\" OR \"wbadmin delete\" OR \"bcdedit\" OR \"recoveryenabled no\" OR \"bootstatuspolicy ignoreallfailures\" OR \"cipher /w\")",
+      "compute": "command, account, host, timestamp",
+      "decision_input": "shadow-copy deletion / backup deletion / recovery disabled = ransomware staging -> CRITICAL"
+    },
+    {
+      "step": 2,
+      "goal": "Defensive service stop",
+      "query": "winlogbeat_winlog_event_id:(7036 OR 7040)",
+      "compute": "burst of service stops on one host targeting AV (ESET), backup, SQL/DB, or VSS services",
+      "decision_input": "mass stop of security/backup/DB services on one host = pre-encryption defense disable"
+    },
+    {
+      "step": 3,
+      "goal": "EDR + miner verdicts",
+      "compute": "ESET ransomware/encryptor detections on the host; Linux/host cryptominer strings (xmrig/kdevtmpfsi/kinsing/sysrv, allow-list jndi/ceurufrd)",
+      "decision_input": "ESET ransomware verdict = confirmed; cryptominer = T1496 resource-hijacking impact"
+    },
+    {
+      "step": 4,
+      "goal": "Chain + scope",
+      "compute": "did this follow lateral movement / a compromise? how many hosts show the same indicators (spread)?",
+      "decision_input": "recovery-inhibit/service-stop across MULTIPLE hosts after lateral movement = active ransomware deployment -> CRITICAL, escalate org-wide"
+    }
+  ],
+  "decision": {
+    "CRITICAL_conf5": "shadow-copy/backup deletion or recovery disabled on any host, ESET ransomware verdict, or the same impact indicators across multiple hosts after lateral movement",
+    "HIGH_conf4": "a burst of AV/backup/DB service stops on one host, or an active cryptominer (T1496)",
+    "MEDIUM_conf3": "a single isolated VSS/bcdedit operation that may be legitimate maintenance - review the account + context",
+    "FP_kill": "backup software (Veeam/Commvault/Windows Backup) legitimately pruning shadow copies; admin running bcdedit during patching/recovery; sanctioned imaging tools - confirm the account + change window"
+  },
+  "false_positive_checks": [
+    "backup products that manage/prune VSS shadows by design (confirm the binary + service account)",
+    "admin bcdedit / recovery changes during legitimate patching or system recovery (change window)",
+    "test/dev hosts running cipher /w for disk cleanup",
+    "Linux allow-list strings jndi / ceurufrd for the miner sweep"
+  ],
+  "evidence_capture": ["host", "recovery_inhibit_cmd", "account", "stopped_services", "eset_verdict", "miner_strings", "preceding_lateral", "hosts_affected", "first_ts", "last_ts"],
+  "output_findings_json": {
+    "surface": "windows",
+    "source": "host",
+    "mitre": "T1490, T1486, T1489, T1496",
+    "tactic": "TA0040 Impact",
+    "killchain": "Actions on Objectives",
+    "query_template": "winlogbeat_winlog_event_id:4688 AND message:(\"vssadmin\" OR \"shadowcopy delete\" OR \"wbadmin delete\" OR \"bcdedit\")"
+  }
+}

@@ -1,0 +1,35 @@
+{
+  "_comment": "Data file for azure-floor.ps1. ALL detection strings (Graylog queries + finding/action text) live here, NOT in the .ps1 body, so the script stays Cortex-clean (suspicious-script detection scans .ps1 bodies, not .json). Placeholders @UPN@ @CNT@ @NC@ @SC@ @FIELD@ @NOISE@ @TOT@ @ID@ @MINFAIL@ @MINCOUNTRIES@ are substituted at runtime.",
+  "rangeSeconds": 86400,
+  "minFail": 10,
+  "minCountries": 5,
+  "noiseCodes": "53003 70043 70044 50173 50140",
+  "streams": [
+    { "env": "PROD-GL", "id": "6979bcc8245e61e78824df15" },
+    { "env": "AZ-GL",   "id": "65cf0501c0fccf5d65f5025f" },
+    { "env": "DEV-GL",  "id": "69fb008584d94819ed097db0" }
+  ],
+  "userFields": [ "azure_prop_user_principal_name", "properties_userPrincipalName" ],
+  "countryField": "source_ip_country_code",
+  "mitre": "T1110.004",
+  "tactic": "TA0006 Credential Access",
+  "killchainStandard": "Credential Access",
+  "killchainEscalated": "Exploitation",
+  "queries": {
+    "byUser":      "(azure_result_signature:FAILURE OR resultSignature:FAILURE) AND NOT (azure_result_type:(@NOISE@) OR resultType:(@NOISE@) OR properties_status_errorCode:(@NOISE@))",
+    "userCountry": "(@FIELD@:\"@UPN@\") AND (azure_result_signature:FAILURE OR resultSignature:FAILURE) AND NOT (azure_result_type:(@NOISE@) OR resultType:(@NOISE@) OR properties_status_errorCode:(@NOISE@))",
+    "userOk":      "(@FIELD@:\"@UPN@\") AND (azure_result_signature:SUCCESS OR resultSignature:SUCCESS)"
+  },
+  "finding": {
+    "textStandard":    "Distributed credential-stuffing on @UPN@ - @CNT@ auth failures from @NC@ countries, 0 success (pre-breach)",
+    "textEscalated":   "BREACH PIVOT: @CNT@ auth failures from @NC@ countries then @SC@ SUCCESS on @UPN@ - likely compromised",
+    "actionStandard":  "Disable legacy/Authenticated-SMTP + force password reset + Conditional-Access legacy-auth block for @UPN@; monitor for any SUCCESS",
+    "actionEscalated": "Disable @UPN@, revoke sessions, force reset, investigate ALL post-success activity",
+    "evidence":        "@CNT@ x FAILURE from @NC@ distinct countries (noise codes excluded); success=@SC@; grouped via @FIELD@",
+    "detail":          "deterministic floor: >= @MINFAIL@ failures AND >= @MINCOUNTRIES@ distinct countries / 24h; convention-proof; runs every daily run regardless of the agentic hunt",
+    "investigate":     "Aggregate source_ip + azure_prob_client_app_used for @UPN@; confirm the legacy-auth (Authenticated SMTP/BAV2ROPC) vector",
+    "reviewText":      "azure floor: @TOT@ auth failures on this tenant but the user field is null under both field conventions - NOT clean, needs manual/raw review",
+    "reviewDetail":    "deterministic floor could not group by user - surfaced as REVIEW, never dropped",
+    "reviewAction":    "Inspect raw full_message on Azure stream @ID@ for the user field; fix/extend the extractor"
+  }
+}

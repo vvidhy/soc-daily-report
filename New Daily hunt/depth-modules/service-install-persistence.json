@@ -1,0 +1,74 @@
+{
+  "module": "service-install-persistence",
+  "version": "1.0",
+  "technique": "Suspicious Windows service install for persistence / remote execution (PsExec-style)",
+  "mitre": ["T1543.003", "T1569.002"],
+  "tactic": "TA0003 Persistence -> TA0002 Execution",
+  "surface": "windows",
+  "applies_to_gl": ["PROD-GL", "OP-GL", "AZ-GL", "DEV-GL"],
+  "trigger": {
+    "from_breadth": "Windows event 7045 (a service was installed) in the window - especially with a binary path in temp/AppData/ProgramData/Users/Public, an encoded/cmd/powershell/rundll32/regsvr32 ImagePath, a random or single-char service name, or a 7045 on a host immediately after a remote (logon type 3/10) logon (= PsExec/remote-service lateral). Also 4697 (audited service install) where Security auditing is on.",
+    "entity": "host_and_service"
+  },
+  "telemetry_required": [
+    "winlogbeat_winlog_event_id:7045 (System channel) and/or 4697 (Security channel)",
+    "event_data ServiceName / ImagePath / ServiceType / StartType / AccountName ; winlogbeat_winlog_computer_name",
+    "winlogbeat_winlog_event_id:4624 (type 3/10) for remote-install correlation ; 4688 for a spawned child process"
+  ],
+  "telemetry_gap_behavior": "No Sysmon (no driver/image-load telemetry), so rely on 7045 (System) + 4697 (Security, only if service-install auditing is on) + 4688. 7045 may be on the System channel only - sweep both channels AND the raw message for 'Service Control Manager' / 'service was installed'. Absent telemetry = KNOWN-GAP note + recommendation to enable service-install auditing, never a clean verdict.",
+  "inputs": { "host": "<computer name>", "service_name": "<service>", "window_seconds": 3900, "remote_correlation_window_seconds": 1800 },
+  "method": [
+    {
+      "step": 1,
+      "goal": "Pull the service-install event",
+      "query": "winlogbeat_winlog_event_id:7045 AND winlogbeat_winlog_computer_name:\"<host>\"",
+      "compute": "ServiceName, ImagePath (binary + args), ServiceType, StartType (auto/demand), AccountName, install timestamp"
+    },
+    {
+      "step": 2,
+      "goal": "Score the ImagePath",
+      "compute": "suspicious if the binary lives in temp / AppData / ProgramData / Users / Public, has a random or single-char name, or the ImagePath contains powershell / cmd /c / -enc / -EncodedCommand / rundll32 / regsvr32 / .bat / .ps1. Benign if a vendor-signed binary in System32 / Program Files with a known service name.",
+      "decision_input": "odd path or encoded/shell ImagePath = malicious service (T1543.003)"
+    },
+    {
+      "step": 3,
+      "goal": "Remote-install correlation (PsExec-style lateral)",
+      "query": "winlogbeat_winlog_event_id:4624 AND winlogbeat_winlog_event_data_LogonType:(3 OR 10) AND winlogbeat_winlog_computer_name:\"<host>\"",
+      "compute": "was there a network/remote logon to this host from a remote source within ~30 min BEFORE the install?",
+      "decision_input": "remote logon -> service install on the same host = remote service creation (lateral movement + persistence) -> chain to lateral-movement"
+    },
+    {
+      "step": 4,
+      "goal": "Execution confirmation",
+      "compute": "did the service binary spawn a shell (4688 child of services.exe = cmd.exe/powershell.exe)? is StartType auto (survives reboot)?",
+      "decision_input": "service that spawns a shell / runs encoded command = T1569.002 service execution"
+    },
+    {
+      "step": 5,
+      "goal": "Account + timing",
+      "compute": "installed by a non-admin, a temp/service account, or off-hours (23:00-05:00)?",
+      "decision_input": "unusual installer account or off-hours raises severity"
+    }
+  ],
+  "decision": {
+    "CRITICAL_conf5": "remotely-installed service (preceded by a remote logon) with an encoded/shell/odd-path ImagePath, OR a service that spawned a shell",
+    "HIGH_conf4": "suspicious ImagePath (temp / encoded / shell) even without a remote-logon correlation",
+    "MEDIUM_conf3": "a new service with an ordinary path and no corroboration - review (may be legitimate software install)",
+    "FP_kill": "vendor-signed installers in Program Files; EDR / agent / patch / backup service installs; SCCM-pushed services; known recurring service names in the host baseline"
+  },
+  "false_positive_checks": [
+    "vendor-signed binaries in Program Files / System32 with a recognized service name = normal software install",
+    "EDR (ESET), monitoring agents, patch and backup services that install services by design",
+    "SCCM / automation service accounts pushing services across hosts (correlate with the change window)",
+    "known recurring service names already in this host's baseline"
+  ],
+  "evidence_capture": ["host", "service_name", "image_path", "service_type", "start_type", "account", "remote_logon_source", "spawned_child", "install_ts", "known_gap_note"],
+  "output_findings_json": {
+    "surface": "windows",
+    "source": "host",
+    "mitre": "T1543.003, T1569.002",
+    "tactic": "TA0003 Persistence",
+    "killchain": "Installation",
+    "query_template": "winlogbeat_winlog_event_id:7045 AND winlogbeat_winlog_computer_name:\"<host>\""
+  }
+}

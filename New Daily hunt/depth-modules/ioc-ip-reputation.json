@@ -1,0 +1,59 @@
+{
+  "module": "ioc-ip-reputation",
+  "version": "1.0",
+  "technique": "IOC enrichment - reputation of an attacking client IP on open threat-intel feeds",
+  "mitre": ["T1190", "T1595.001"],
+  "tactic": "TA0043 Reconnaissance -> TA0001 Initial Access",
+  "surface": "iis",
+  "applies_to_gl": ["OP-GL", "PROD-GL", "AZ-GL", "DEV-GL"],
+  "trigger": {
+    "from_breadth": "An IIS / APP finding with an A03-injection / webshell / traversal / SSRF / scanner token in URI_Query (or the raw W3SVC message) AND an EXTERNAL client IP. This is the 'exploitation in URI_Query -> check the Client_ip on a threat feed' enrichment.",
+    "entity": "client_ip"
+  },
+  "telemetry_required": [
+    "Client_ip (OP-GL parses it; PROD/AZ/DEV frequently NULL -> take the source IP from the raw W3SVC message, or the Origin_ip enrichment field)",
+    "at least one TI API key in .ti-keys.json (virustotal / abuseipdb / otx)"
+  ],
+  "telemetry_gap_behavior": "If Client_ip is null, extract the requesting IP from the raw message before enriching. If NO TI key is configured, ti-lookup returns verdict=no-data -> STILL report the exploitation finding, just without reputation (a missing feed never makes an attack clean). If the IP is RFC1918/loopback or allow-listed, note internal/allow-listed and skip the feed.",
+  "inputs": { "entity_ip": "<external client IP from the exploitation finding>", "exploitation_token": "<the URI_Query attack token that fired>", "http_status": "<status of the attack request>" },
+  "method": [
+    {
+      "step": 1,
+      "goal": "Extract the external client IP from the exploitation finding",
+      "compute": "Client_ip on OP-GL; on PROD/AZ/DEV parse the IP from the raw W3SVC line or use Origin_ip. Skip if RFC1918/loopback (internal) or on the Cato/Nessus allow-list."
+    },
+    {
+      "step": 2,
+      "goal": "Query the threat-intel feeds (deterministic, cached, 0 model tokens)",
+      "run": "powershell -NoProfile -ExecutionPolicy Bypass -File C:\\Users\\VidhyaV\\soc-monitor\\ti-lookup.ps1 -Ip <IP>",
+      "compute": "parse the JSON verdict: verdict (malicious|suspicious|clean|no-data|internal|allowlisted), score, virustotal.malicious (vendor count), abuseipdb.confidence (0-100), otx.pulses, as_owner, country, sources_checked"
+    },
+    {
+      "step": 3,
+      "goal": "Correlate the IP across the rest of this run (entity pivot)",
+      "compute": "does the same IP appear in other surface findings this window? hosting/VPS/Tor as_owner, or a country outside the GEO-ACL, raises severity",
+      "decision_input": "same IP attacking multiple surfaces + a TI-malicious verdict = coordinated actor -> escalate the whole chain"
+    }
+  ],
+  "decision": {
+    "CRITICAL_conf5": "TI verdict malicious AND the exploitation request got HTTP 2xx (confirmed compromise from a known-bad IP)",
+    "HIGH_conf4": "TI verdict malicious on the attacking IP even where the request was blocked (403/404/302) - a known-bad actor is actively targeting; OR TI suspicious + HTTP 2xx",
+    "MEDIUM_conf3": "exploitation token present but TI verdict clean/no-data - report the ATTEMPT (a clean reputation does NOT exonerate a logged attack)",
+    "FP_kill": "the IP is a sanctioned scanner (Nessus/Tenable) or Cato egress; a single stale OTX pulse on a recycled CDN/hosting IP with no VT/AbuseIPDB corroboration; legitimate security-research scanners you have whitelisted"
+  },
+  "false_positive_checks": [
+    "Cato egress 140.82.202.196 / 199.27.40.187 / 123.253.153.138 and Nessus/Tenable 10.102.100.199 / 10.101.100.160 / 10.250.100.77 / 10.220.100.199 -> ti-lookup returns allowlisted/internal; never escalate",
+    "shared CDN / cloud-hosting IP (Cloudflare, AWS, Azure) with a low VT count can be a neighbor FP -> weigh as_owner + require AbuseIPDB or multiple VT vendors",
+    "one old OTX pulse alone (pulses < 3) is weak -> treat as suspicious not malicious unless VT/AbuseIPDB agree"
+  ],
+  "evidence_capture": ["client_ip", "ti_verdict", "ti_score", "vt_malicious", "abuseipdb_confidence", "otx_pulses", "as_owner", "country", "exploitation_token", "http_status", "other_surfaces"],
+  "output_findings_json": {
+    "surface": "iis",
+    "source": "web",
+    "mitre": "T1190, T1595.001",
+    "tactic": "TA0001 Initial Access",
+    "killchain": "Reconnaissance -> Exploitation",
+    "query_template": "<the IIS exploitation query that fired> ; enrich anchor_ip via ti-lookup.ps1 -Ip <Client_ip>",
+    "ti": "{verdict, score, vt_malicious, abuseipdb_confidence, otx_pulses, as_owner, country}"
+  }
+}

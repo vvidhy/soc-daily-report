@@ -1,0 +1,68 @@
+{
+  "module": "impossible-travel",
+  "version": "1.0",
+  "technique": "Impossible travel - one identity authenticating from geographically impossible locations",
+  "mitre": ["T1078"],
+  "tactic": "TA0001 Initial Access -> TA0005 Defense Evasion",
+  "surface": "azure",
+  "applies_to_gl": ["AZ-GL", "PROD-GL", "DEV-GL"],
+  "trigger": {
+    "from_breadth": "A UPN with SUCCESSFUL sign-ins from >=2 distinct countries in the window, OR a credential-stuffing-pivot / password-spray lead whose success came from a new country (UEBA new-geo signal).",
+    "entity": "user_principal_name"
+  },
+  "telemetry_required": [
+    "azure_result_signature OR resultSignature",
+    "azure_prop_user_principal_name OR properties_userPrincipalName",
+    "source_ip_country_code OR properties_location_countryOrRegion",
+    "callerIpAddress OR source_ip"
+  ],
+  "telemetry_gap_behavior": "If country fields are null but source_ip exists, resolve country from the IP (geo lookup / raw message) before scoring. If neither country nor IP is present on the success events, emit REVIEW geo-blind for the UPN - NEVER clean off a null geo field. If the Azure stream total=0/window, emit REVIEW stream-empty.",
+  "inputs": { "entity_upn": "<UPN from lead>", "window_seconds": 43200 },
+  "method": [
+    {
+      "step": 1,
+      "goal": "Pull every SUCCESS sign-in for the UPN across a 12h look-back (the prior leg may predate the hourly window)",
+      "query": "(azure_result_signature:SUCCESS OR resultSignature:SUCCESS) AND (azure_prop_user_principal_name:\"<UPN>\" OR properties_userPrincipalName:\"<UPN>\")",
+      "compute": "ordered-by-time list of {timestamp, source_ip, country, city, geo_lat_long, appDisplayName, clientAppUsed}"
+    },
+    {
+      "step": 2,
+      "goal": "Compute required travel speed between consecutive logins",
+      "compute": "for each consecutive pair: great-circle km between geos / hours between timestamps = required km/h. Track distinct countries and the minimum inter-country time gap.",
+      "decision_input": "required speed > 900 km/h (faster than commercial air) = IMPOSSIBLE; country change with < 60 min gap and > 1000 km = impossible"
+    },
+    {
+      "step": 3,
+      "goal": "Grade token / MFA posture of the suspect leg (replay vs fresh auth)",
+      "fields": "properties_authenticationRequirement (singleFactor vs multiFactor) ; properties_incomingTokenType (primaryRefreshToken = PRT/replay) ; properties_tokenProtectionStatusDetails_signInSessionStatus (unbound = AiTM) ; properties_conditionalAccessStatus OR azure_prob_condi_access_status",
+      "decision_input": "impossible-travel leg that is singleFactor where MFA is required, OR an unbound/PRT token from the new geo = token replay / AiTM, not just a second password auth"
+    },
+    {
+      "step": 4,
+      "goal": "Legacy-auth + app context",
+      "check": "clientAppUsed of the suspect leg in {Authenticated SMTP, BAV2ROPC, IMAP4, POP3, Exchange ActiveSync, Other clients}; appDisplayName of both legs",
+      "decision_input": "legacy clientApp on the foreign leg raises ceiling (MFA-bypass capable)"
+    }
+  ],
+  "decision": {
+    "CRITICAL_conf5": "impossible-speed pair of SUCCESSES AND (foreign leg is singleFactor/legacy/unbound-token OR the foreign country is outside the GEO-ACL)",
+    "HIGH_conf4": "2+ countries for the UPN within the window with a borderline-impossible gap, MFA satisfied but from a never-before-seen country (new-geo)",
+    "MEDIUM_conf3": "2 countries but one leg is a known VPN/Cato egress or a mobile-carrier CGNAT flip - report as review-worthy, not confirmed",
+    "FP_kill": "the second country is a Cato egress IP (140.82.202.196 / 199.27.40.187 / 123.253.153.138) or a documented corporate VPN; both legs MFA-satisfied from the user's baseline devices"
+  },
+  "false_positive_checks": [
+    "Cato egress 140.82.202.196 / 199.27.40.187 / 123.253.153.138 -> country flip is egress, not travel; cap MEDIUM unless paired with admin/export action",
+    "corporate VPN / cloud-proxy egress that legitimately changes apparent country",
+    "mobile carrier CGNAT that geolocates to a neighboring country",
+    "known traveler baseline for the UPN (if a 7-day baseline of countries is available)"
+  ],
+  "evidence_capture": ["upn", "countries", "ip_legs", "max_required_kmh", "min_gap_min", "suspect_leg_ip", "suspect_leg_country", "auth_requirement", "token_type", "clientAppUsed", "first_leg_ts", "suspect_leg_ts"],
+  "output_findings_json": {
+    "surface": "azure",
+    "source": "cloud",
+    "mitre": "T1078",
+    "tactic": "TA0001 Initial Access",
+    "killchain": "Delivery -> Exploitation",
+    "query_template": "(azure_result_signature:SUCCESS OR resultSignature:SUCCESS) AND (azure_prop_user_principal_name:\"<UPN>\" OR properties_userPrincipalName:\"<UPN>\")"
+  }
+}

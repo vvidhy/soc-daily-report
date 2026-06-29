@@ -1,0 +1,70 @@
+{
+  "module": "ad-recon-discovery",
+  "version": "1.0",
+  "technique": "Internal reconnaissance / AD enumeration before lateral movement",
+  "mitre": ["T1087", "T1018", "T1069", "T1482", "T1016", "T1046"],
+  "tactic": "TA0007 Discovery",
+  "surface": "windows",
+  "applies_to_gl": ["PROD-GL", "OP-GL", "AZ-GL", "DEV-GL"],
+  "trigger": {
+    "from_breadth": "One account or host running a burst (>=3 distinct) of discovery LOLBins in 4688 command lines within the window (net group / net user / net localgroup, nltest, dsquery, ldifde, csvde, whoami /all, quser, arp -a, ipconfig /all, systeminfo, tasklist, route print, nbtstat), OR a spike in 4662/4661 directory-object reads from one subject. Also chains from a confirmed compromise -> what did the foothold enumerate next?",
+    "entity": "account_or_source_host"
+  },
+  "telemetry_required": [
+    "winlogbeat_winlog_event_id:4688 + message (CommandLine) + winlogbeat_winlog_channel:Security",
+    "winlogbeat_winlog_event_data_SubjectUserName / winlogbeat_winlog_computer_name",
+    "4662 (directory object access) / 4661 (SAM object access) for AD-object enumeration"
+  ],
+  "telemetry_gap_behavior": "No Sysmon, so 4688 CommandLine (confirmed collected) is the discovery lens. PowerShell script-block logging is OFF -> AD-module recon (Get-ADUser/Get-NetUser/PowerView) is partly blind; also sweep 4688 for powershell.exe with AD cmdlet hints. Absent telemetry = KNOWN-GAP note + recommendation to enable script-block logging, never clean.",
+  "inputs": { "entity": "<account or host>", "window_seconds": 3900, "pivot_window_seconds": 21600 },
+  "method": [
+    {
+      "step": 1,
+      "goal": "Burst of distinct discovery tools",
+      "query": "winlogbeat_winlog_event_id:4688 AND winlogbeat_winlog_channel:Security AND message:(\"net group\" OR \"net user\" OR \"net localgroup\" OR \"nltest\" OR \"dsquery\" OR \"ldifde\" OR \"csvde\" OR \"whoami /all\" OR \"quser\" OR \"systeminfo\" OR \"nbtstat\" OR \"route print\")",
+      "compute": "for the entity: distinct discovery tools used, sequence, timing; count distinct = breadth of enumeration",
+      "decision_input": ">=3 distinct discovery tools from one account/host in minutes = active internal recon"
+    },
+    {
+      "step": 2,
+      "goal": "Privileged-group / trust enumeration (the high-value targets)",
+      "query": "winlogbeat_winlog_event_id:4688 AND message:(\"domain admins\" OR \"enterprise admins\" OR \"net group \\\"domain admins\\\"\" OR \"nltest /domain_trusts\" OR \"dsquery group\")",
+      "compute": "did the entity enumerate privileged groups or domain trusts?",
+      "decision_input": "enumerating Domain Admins / Enterprise Admins / domain trusts = targeting for escalation -> raise severity"
+    },
+    {
+      "step": 3,
+      "goal": "Directory-object enumeration (BloodHound-style)",
+      "query": "winlogbeat_winlog_event_id:(4662 OR 4661) AND winlogbeat_winlog_channel:Security AND winlogbeat_winlog_event_data_SubjectUserName:\"<account>\"",
+      "compute": "spike in DS/SAM object reads from one account = bulk AD enumeration (LDAP/ADWS collection)",
+      "decision_input": "high-volume 4662/4661 from a non-admin/non-service account = mass enumeration"
+    },
+    {
+      "step": 4,
+      "goal": "Chain correlation",
+      "compute": "did recon follow a confirmed compromise of this entity (cred-stuffing / RDP brute / impossible-travel)? did lateral movement FOLLOW the recon?",
+      "decision_input": "compromise -> recon -> lateral = the classic post-exploitation sequence -> escalate the chain to CRITICAL"
+    }
+  ],
+  "decision": {
+    "CRITICAL_conf5": "recon burst that follows a confirmed compromise AND precedes lateral movement, or that enumerates Domain/Enterprise Admins + trusts",
+    "HIGH_conf4": ">=3 distinct discovery tools or a 4662/4661 enumeration spike from one non-admin account with no business reason",
+    "MEDIUM_conf3": "isolated discovery commands that may be legitimate admin/helpdesk activity - review",
+    "FP_kill": "admin / helpdesk troubleshooting scripts; monitoring & inventory agents (SCCM, asset tools); login scripts running systeminfo/ipconfig; sanctioned vuln scanners"
+  },
+  "false_positive_checks": [
+    "admin/helpdesk accounts running net/whoami/systeminfo during normal support (baseline the account)",
+    "SCCM / inventory / monitoring agents that enumerate by design",
+    "logon scripts that always run ipconfig/systeminfo",
+    "Nessus/Tenable scanners (10.102.100.199 / 10.101.100.160 / 10.250.100.77 / 10.220.100.199)"
+  ],
+  "evidence_capture": ["entity", "distinct_tools", "tool_sequence", "priv_group_enum", "trust_enum", "ds_object_reads", "preceding_compromise", "following_lateral", "first_ts", "last_ts"],
+  "output_findings_json": {
+    "surface": "windows",
+    "source": "host",
+    "mitre": "T1087, T1018, T1069, T1482",
+    "tactic": "TA0007 Discovery",
+    "killchain": "Actions on Objectives",
+    "query_template": "winlogbeat_winlog_event_id:4688 AND message:(\"net group\" OR \"nltest\" OR \"dsquery\" OR \"whoami /all\")"
+  }
+}

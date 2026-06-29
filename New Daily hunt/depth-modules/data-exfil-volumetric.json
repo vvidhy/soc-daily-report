@@ -1,0 +1,67 @@
+{
+  "module": "data-exfil-volumetric",
+  "version": "1.0",
+  "technique": "Volumetric data exfiltration - one entity's outbound volume far above its baseline",
+  "mitre": ["T1048", "T1567"],
+  "tactic": "TA0010 Exfiltration",
+  "surface": "cross",
+  "applies_to_gl": ["PROD-GL", "OP-GL", "AZ-GL", "DEV-GL"],
+  "trigger": {
+    "from_breadth": "An entity (SFTP Client_ip, IIS source IP / user on a data endpoint, or FortiGate srcip) whose outbound bytes in the window are far above normal, OR an entity already flagged by a compromise module (exfil right after a flagged login).",
+    "entity": "client_ip OR user OR host"
+  },
+  "telemetry_required": [
+    "SFTP: Size_In_MB + Client_ip (Cerberus source field is garbage - key on Client_ip)",
+    "IIS: Server_Bytes / sc_bytes + URI_Stream + Client_ip (raw message if parsed null)",
+    "FortiGate: sentbyte + srcip + dstip + dstcountry"
+  ],
+  "telemetry_gap_behavior": "If the byte field is null on the parsed event, sweep the raw message for the byte token before scoring; if no byte data exists for the channel, emit REVIEW volume-blind, never clean. SFTP source field is log-level tokens not a host - ALWAYS key SFTP on Client_ip.",
+  "inputs": { "entity": "<Client_ip / user / host from lead>", "window_seconds": 3900, "baseline_window_seconds": 604800 },
+  "method": [
+    {
+      "step": 1,
+      "goal": "Sum the entity's outbound volume in the window, per channel",
+      "compute": "SFTP: sum(Size_In_MB) by Client_ip ; IIS: sum(Server_Bytes/sc_bytes) by source on /download|/export|/api/document|/record endpoints ; Forti: sum(sentbyte) by srcip to external dstip",
+      "note": "exact-count on the ONE entity - do not rely on a top-N aggregate that may truncate"
+    },
+    {
+      "step": 2,
+      "goal": "Establish the entity's baseline and score the deviation",
+      "compute": "pull the entity's prior 7-day per-hour outbound volume -> mean + stdev -> z-score of the current window. Also test absolute floors.",
+      "decision_input": "z-score > 3 above the entity's own mean, OR absolute: SFTP single Client_ip > 500 MB/window; IIS session sc_bytes > 100 MB on a data endpoint; Forti sentbyte to one external dst > 1 GB/window"
+    },
+    {
+      "step": 3,
+      "goal": "Destination reputation",
+      "compute": "destination IP / country / ASN. External + new-country + hosting/VPS ASN raises severity; internal or known-backup target lowers it.",
+      "decision_input": "large transfer to an external hosting/VPS/non-ACL destination = exfil; to a known internal backup/replication target = FP"
+    },
+    {
+      "step": 4,
+      "goal": "Compromise correlation",
+      "check": "is this entity ALSO flagged this run by credential-stuffing-pivot / impossible-travel / a Windows or Linux finding?",
+      "decision_input": "volumetric egress from an entity with a concurrent compromise finding = post-compromise exfil -> escalate the whole chain to CRITICAL (killchain Actions)"
+    }
+  ],
+  "decision": {
+    "CRITICAL_conf5": "above-baseline egress from an entity that ALSO has a compromise finding this run (login anomaly -> exfil chain)",
+    "HIGH_conf4": "z-score > 3 OR absolute floor breached, to an external / non-ACL / hosting destination, no benign explanation",
+    "MEDIUM_conf3": "large transfer but to a known/internal/Cato destination, or within a plausible-but-unconfirmed business pattern",
+    "FP_kill": "known scheduled backup / sync / replication job in the entity's baseline; Cato egress destination; transfer size within the entity's normal 7-day band"
+  },
+  "false_positive_checks": [
+    "known backup / DB-dump / sync jobs that legitimately move large volumes on a schedule (confirm via baseline + destination)",
+    "Cato egress 140.82.202.196 / 199.27.40.187 / 123.253.153.138 as source or destination -> cap MEDIUM unless paired with a compromise finding",
+    "transfer size within the entity's own 7-day mean+/-3stdev = normal for this entity",
+    "internal replication / SAN / backup target as destination"
+  ],
+  "evidence_capture": ["entity", "channel", "bytes_window_mb", "baseline_mean_mb", "zscore", "dest_ip", "dest_country", "dest_asn", "endpoint_or_share", "concurrent_compromise_finding", "window_start", "window_end"],
+  "output_findings_json": {
+    "surface": "sftp",
+    "source": "host",
+    "mitre": "T1048, T1567",
+    "tactic": "TA0010 Exfiltration",
+    "killchain": "Actions on Objectives",
+    "query_template": "Client_ip:\"<entity>\" (SFTP Size_In_MB) | source:\"<entity>\" on /export|/download|/api/document (IIS Server_Bytes)"
+  }
+}

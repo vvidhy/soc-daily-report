@@ -1,0 +1,1 @@
+CreateObject("Wscript.Shell").Run "cmd /c ""C:\Users\VidhyaV\soc-monitor\daily-report.cmd""", 0, False

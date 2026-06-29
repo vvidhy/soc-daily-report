@@ -1,0 +1,166 @@
+﻿DEPTH PASS - independent MITRE tactic sweep. Runs on its own; breadth is optional context.
+
+FIELD FALLBACK RULE (global, mandatory): If any named/parsed field returns null or zero results on a GL, DO NOT mark the module clean or skip it. Re-run the same detection using the raw message field: message:*<token>* (Lucene wildcard). Only mark a check as "known-gap" if the raw message search ALSO returns no data. "Parsed field absent" is NEVER a terminal verdict when raw messages exist.
+
+RULE 0 - DO NO HARM:
+- Never edit daily-latest.md or any breadth output file directly.
+- This pass is ADD-ON and MONOTONIC: you may ADD new findings or RAISE severity of existing
+  breadth findings. Never remove, downgrade, or suppress.
+- If a module finds nothing, write no entry for it. Worst case = report unchanged.
+
+MODEL: sonnet. Skill tool disabled. Call mcp__AZ-GL__ / PROD-GL / DEV-GL / OP-GL directly.
+
+STEP 1 - OPTIONAL CONTEXT (do not modify):
+- If reports-noskill\daily-latest.md exists, read it to extract any breadth findings.
+- If reports-noskill\alert-*.json files exist, read them too.
+- These are CONTEXT ONLY. Depth does not depend on breadth having run.
+- If no breadth output exists, proceed directly to STEP 2 with no leads.
+
+STEP 1.5 - MODULE TRIAGE (classify before querying — saves turns on quiet days):
+After reading breadth context, assign each of the 14 modules a TIER based on its applies_to_surface:
+
+  PRIORITY  — applies_to_surface had sev=HIGH or sev=CRITICAL in breadth → run full method steps (~2t each)
+  STANDARD  — applies_to_surface had sev=MEDIUM in breadth, OR no breadth finding but surface is
+               high-volume (iis, rdp, azure) → run primary detection query only (~1t each)
+  LIGHT     — applies_to_surface had only LOW/CLEAN/REVIEW in breadth → emit REVIEW with paste-ready
+               query from trigger.from_breadth; skip all live Graylog queries (0t)
+
+If daily-latest.md was missing or unreadable: treat every module as STANDARD.
+Record each module's tier in the STEP 2.5 coverage log. LIGHT modules count as status="skipped",
+reason="no MEDIUM+ breadth lead on surface".
+TURN ALLOCATION: ~2t per PRIORITY, ~1t per STANDARD, 0t per LIGHT. Reserve turns 13-15 for file writes.
+This triage is intentional — on a quiet day depth focuses on confirming clean surfaces,
+not exhausting the budget re-checking surfaces breadth already found clean.
+
+STEP 2 - RUN MODULES BY TIER:
+- Load every file in depth-modules\*.json.
+- For each module, run it according to its tier from STEP 1.5.
+- For PRIORITY modules: run full method steps across all applies_to_gl.
+- For STANDARD modules: run ONLY the primary detection query (first query in method steps)
+  across all applies_to_gl. If count > 0: escalate to PRIORITY and run remaining steps.
+- For LIGHT modules: skip live queries; add REVIEW finding (STEP 3) with paste-ready query.
+- Use trigger.from_breadth as the detection pattern for any new (non-PRIORITY) module.
+- If breadth already found an entity matching this module's tactic:
+    - Use that entity as a starting point.
+    - Do NOT re-run exact queries breadth already ran on the same GL/surface.
+- Run method steps in order. Exact-count targeted queries, not top-N aggregates.
+- Honor telemetry_gap_behavior: absent data = known-gap, NEVER clean.
+- Apply the module's decision rubric + false_positive_checks.
+- TI ENRICHMENT: for any finding whose entity is an EXTERNAL IP (non-RFC1918, non-allowlisted),
+  before writing it, run:
+    powershell -NoProfile -ExecutionPolicy Bypass -File D:\Vidhya\New Daily hunt\ti-enrich.ps1 -Ip <entity>
+  Fold the result into the finding:
+    evidence += "VT <malicious>/<total> malicious, AbuseIPDB <score>%, <as_owner>/<country>"
+    detail  += verdict reasoning (why reputation raises/lowers confidence)
+  Escalate to HIGH minimum when verdict=MALICIOUS (VT malicious>=5 OR AbuseIPDB>=75).
+  Escalate to CRITICAL when the attack also succeeded (HTTP 200 / auth success / session accepted).
+  The helper no-ops if .ti-keys.json is absent — safe to call every run.
+  SKIP: RFC1918 IPs, internal hostnames (e.g. OPDEVWS02, ssadmin), loopback.
+  Do NOT bulk-check every IP — only IPs that are the direct entity of a confirmed attack signal.
+- If nothing found: do NOT write a finding entry — but you MUST still record the module
+  in the STEP 2.5 coverage table. "Nothing found" and "never queried" must be distinguishable.
+
+STEP 2.5 - WRITE COVERAGE LOG + SKIPPED-MODULE REVIEW FINDINGS (MANDATORY — before findings):
+After all modules finish (or turn budget is hit), you must do THREE things:
+
+A) Print a coverage line to stdout for EVERY module (all 14 lines, no exceptions):
+   [COVERAGE] <module-name> | GLs: <gl1,gl2,...> | queries_run: <N> | found: <N> | status: <ran|skipped|budget>
+   If skipped/budget, add: | reason: <one-line reason>
+   status values:
+     "ran"     = at least one query was sent to a Graylog for this module
+     "skipped" = module intentionally skipped (telemetry gap, not applicable)
+     "budget"  = module not reached due to turn limit — analyst must run manually
+
+B) Call the Write tool to create reports-noskill\depth-coverage.json:
+   Raw JSON array, one object per module, ALL 14 entries required:
+   [
+     {"module":"webshell-upload-exec","gls":["OP-GL","PROD-GL"],"queries_run":3,"found":0,"status":"ran"},
+     {"module":"privilege-escalation","gls":[],"queries_run":0,"found":0,"status":"budget","reason":"Turn limit reached — run manually"}
+   ]
+
+C) FOR EVERY MODULE WITH status "budget": add a REVIEW entry to the findings array in STEP 3.
+   Use the module's trigger.from_breadth and method steps to construct a paste-ready Graylog query.
+   These REVIEW entries allow an analyst to manually complete what depth did not reach.
+   The query field must be a real runnable Graylog search — not a description of one.
+   Example REVIEW entry for a budget-skipped module:
+   {
+     "sev": "REVIEW",
+     "env": "ALL-GL",
+     "surface": "depth",
+     "source": "host",
+     "entity": "module:lateral-movement-smb",
+     "mitre": "T1021.002",
+     "tactic": "TA0008 Lateral Movement",
+     "killchain": "Actions on Objectives",
+     "finding": "Depth module lateral-movement-smb not reached — manual check required",
+     "detail": "Turn budget exhausted before this module ran. No query was sent. Not a clean result.",
+     "evidence": "Module not reached — status: budget",
+     "action": "Run manually in OP-GL: winlogbeat_winlog_event_id:4624 AND winlogbeat_winlog_event_data_LogonType:3 AND NOT winlogbeat_winlog_event_data_IpAddress:10.*",
+     "query": "winlogbeat_winlog_event_id:4624 AND winlogbeat_winlog_event_data_LogonType:3 AND NOT winlogbeat_winlog_event_data_IpAddress:10.*",
+     "verdict": "REVIEW",
+     "confidence": 0,
+     "change": "known-gap",
+     "links_breadth_finding": ""
+   }
+
+STEP 3 - WRITE (MANDATORY — this step is NOT optional):
+- YOUR FINAL ACTION MUST BE calling the Write tool to create reports-noskill\depth-findings.json.
+- Do NOT output findings as text or markdown. Text output is discarded. Only the file matters.
+- If you output a summary instead of calling Write, the entire depth pass produces nothing.
+- Use the Write tool to create reports-noskill\depth-findings.json as a raw JSON array.
+  No markdown, no code fences, no prose — just the array.
+
+  The "detail" field is the most important field. It must contain:
+    1. WHAT HAPPENED — actual log lines with timestamps, source IP, URI/action, status code,
+       exactly as they appear in Graylog. Quote real evidence, not summaries.
+    2. WHY IT MATTERS — one sentence on risk/impact even if the attempt failed.
+    3. RECOMMENDED ACTION — specific, paste-ready (block IP, rotate cred, patch KB, etc.)
+  Write detail like an analyst who pulled the logs and is briefing a SOC lead.
+  Example of a good detail value:
+    "12:23:43 GET /wp-admin/admin-ajax.php?action=ays_sccp_results_export_file&sccp_id[]=1) AND (SELECT 1183 FROM (SELECT(SLEEP(6)))UPad) -> 404 | 12:30:18 GET /wp-content/plugins/admin-font-editor/readme.txt -> 404 | 14:21:48 GET / -> 200. Time-based blind SQLi + WordPress plugin recon against securefoia.ssa.gov. App is .NET so every WP path 404'd — no successful exploitation. Injection payloads at federal FOIA portals are reportable even when blocked. ACTION: block 49.37.157.113 at WAF; verify generic SQLi signature independent of the 404."
+
+  Full JSON structure — ALL fields required for the PDF triage card and summary table:
+  [
+    {
+      "sev": "HIGH",
+      "env": "OP-GL",
+      "surface": "iis",
+      "source": "web",
+      "entity": "49.37.157.113",
+      "mitre": "T1190, T1595.003",
+      "tactic": "TA0001 Initial Access",
+      "killchain": "Reconnaissance",
+      "finding": "Time-based blind SQLi + WordPress recon against securefoia.ssa.gov — all 404, no compromise",
+      "detail": "App is .NET FOIAXpress; every WordPress path 404'd so injection had no reachable endpoint. Reportable even when blocked — attacker probed federal FOIA portal with time-based blind SQLi payload.",
+      "evidence": "12:23:43 GET /wp-admin/admin-ajax.php?action=ays_sccp_results_export_file&sccp_id[]=1) AND (SELECT 1183 FROM (SELECT(SLEEP(6)))UPad) -> 404 | 12:30:18 GET /wp-content/plugins/admin-font-editor/readme.txt -> 404 | 14:21:48 GET / -> 200",
+      "action": "Block 49.37.157.113 at edge/WAF; verify generic SQLi signature independent of 404",
+      "query": "Client_ip:49.37.157.113 AND filebeat_log_file_path:*inetpub*",
+      "verdict": "TP",
+      "confidence": 4,
+      "change": "added",
+      "links_breadth_finding": ""
+    }
+  ]
+
+  Field guide:
+  - finding     = one-line title shown in the triage card header (formerly "title")
+  - detail      = narrative "why it matters / how detected" — NO raw log lines here
+  - evidence    = 2-5 VERBATIM raw log lines copy-pasted from the Graylog message field exactly as returned by search_logs_relative (each on its own line, prefixed with its timestamp). Do NOT paraphrase. After the raw lines, add a one-line count summary.
+  - action      = paste-ready next step — shown in the PDF summary table "Action Required" column
+  - source      = web | cloud | host | network
+  - killchain   = Reconnaissance | Delivery | Exploitation | Installation | C2 | Actions on Objectives
+  - verdict     = TP | FP | REVIEW
+  - confidence  = 1–5 integer
+
+- change values: added | escalated | confirmed | known-gap | fp-cleared-with-evidence
+- links_breadth_finding: breadth entity this deepens, or empty string if depth found it first.
+- Only write entries where something was actually found. Skip modules that found nothing.
+- If all findings are benign confirmations, still write the array (do not skip the file).
+- Do NOT rewrite daily-latest.md. The merge script reads depth-findings.json separately.
+
+DONE WHEN: all reachable modules have run (or been marked budget/skipped),
+depth-coverage.json is written (all 14 entries, one per module, status ran|skipped|budget),
+depth-findings.json is written (real findings + one REVIEW entry per budget-skipped module),
+and no breadth output was modified.
+Budget-skipped modules in depth-findings.json replace depth-catchup — an analyst can paste the
+query field directly into Graylog to complete the check manually.

@@ -1,0 +1,1 @@
+winlogbeat_winlog_event_id:4688 AND message:("-enc" OR "DownloadString" OR "FromBase64String" OR "Invoke-Expression")

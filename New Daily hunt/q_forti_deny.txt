@@ -1,0 +1,1 @@
+action:deny AND type:traffic

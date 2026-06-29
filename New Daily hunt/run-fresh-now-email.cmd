@@ -1,0 +1,17 @@
+@echo off
+rem On-demand FRESH full-depth no-skill scan, TODAY, EMAIL-ONLY delivery.
+rem Calls the RAW daily-report cmd directly (bypasses the guarded 06:55 wrapper).
+rem SOC_BYPASS_DEADLINE=1 skips the stale-retry/correlation/depth deadline guards.
+rem SOC_SKIP_TEAMS=1 suppresses Teams cards; email to vidhya.v@casepoint.in still sends.
+cd /d "D:\Vidhya\New Daily hunt"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$d=Get-Date -Format yyyyMMdd; del \"logs-noskill\hunt-complete-$d.txt\" -EA SilentlyContinue; del \"logs-noskill\delivered-$d.txt\" -EA SilentlyContinue" 2>nul
+del /q "logs-noskill\token-exhausted.flag" 2>nul
+del /q "logs-noskill\gaps-rerun.flag" 2>nul
+del /q "logs-noskill\skip-hunt.flag" 2>nul
+del /q "logs-noskill\run-start.flag" 2>nul
+del /q "reports-noskill\coverage-gaps.json" 2>nul
+set SOC_BYPASS_DEADLINE=1
+set SOC_SKIP_TEAMS=1
+echo ==== FRESH-NOW-EMAIL full-scan (forced, email-only) %DATE% %TIME% ==== >> "logs-noskill\daily.log"
+call "D:\Vidhya\New Daily hunt\daily-report-noskill.cmd"
+echo ==== FRESH-NOW-EMAIL full-scan done %DATE% %TIME% ==== >> "logs-noskill\daily.log"

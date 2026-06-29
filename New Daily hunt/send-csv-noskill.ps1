@@ -1,0 +1,262 @@
+﻿# send-csv-noskill.ps1
+# Exports findings to CSV and emails the CSV + branded PDF report to the SOC inbox.
+# Columns match the PDF table exactly:
+#   Severity | Surface | Env | Finding | Evidence | MITRE | Kill Chain | Tactic |
+#   Verdict | Confidence | Graylog Query Used | Investigate Further | Action | Correlation
+#
+# SMTP relay: 10.102.100.112 (MTSMTP01), port 25, no auth, internal only.
+
+$ErrorActionPreference = 'Continue'
+$proj   = 'D:\Vidhya\New Daily hunt'
+$dir    = "$proj\reports-noskill"
+$now    = Get-Date
+$dateStr = $now.ToString('yyyy-MM-dd')
+
+$smtpHost = '10.102.100.112'
+$smtpPort = 25
+$fromAddr = 'soc-noskill@casepoint.in'
+$toAddr   = 'vidhya.v@casepoint.in'
+
+# ── Read findings from daily-latest.md ───────────────────────────────────────
+$reportFile = "$dir\daily-latest.md"
+if (-not (Test-Path $reportFile)) {
+  Write-Output "ERROR: $reportFile not found - nothing to send"; exit 1
+}
+
+$raw = (Get-Content $reportFile -Raw -Encoding utf8) -replace '[^\x20-\x7E\r\n]',''
+$m   = [regex]::Match($raw, '(?ms)```findings-json\s*[\r\n]+(.*?)[\r\n]+```')
+if (-not $m.Success) {
+  Write-Output 'ERROR: no findings-json block in daily-latest.md'; exit 1
+}
+
+$allFindings = @()
+try { $allFindings = $m.Groups[1].Value | ConvertFrom-Json }
+catch { Write-Output "ERROR parsing findings-json: $($_.Exception.Message)"; exit 1 }
+
+# Flatten any {value:[...],Count:N} wrapper objects. The hunt sometimes nests the
+# findings array inside a wrapper instead of emitting a flat list; without this only
+# the un-wrapped findings are counted and the wrapper becomes a junk row (and 25
+# real findings silently vanish from the CSV/email).
+$flat = [System.Collections.Generic.List[object]]::new()
+foreach ($item in @($allFindings)) {
+  $props = @($item.PSObject.Properties.Name)
+  if (($props -contains 'value') -and ($props -notcontains 'sev')) {
+    foreach ($sub in @($item.value)) { if ($null -ne $sub) { $flat.Add($sub) } }
+  } else {
+    $flat.Add($item)
+  }
+}
+$allFindings = @($flat)
+
+# Drop CLEAN (matches PDF behaviour)
+$findings = @($allFindings | Where-Object { [string]$_.sev -ne 'CLEAN' })
+
+if ($findings.Count -eq 0) {
+  Write-Output 'No non-clean findings - sending clean-day email without attachment.'
+}
+
+# ── Sort: CRITICAL → HIGH → MEDIUM → REVIEW → LOW (same order as PDF table) ─
+$ord    = @{ CRITICAL=0; HIGH=1; MEDIUM=2; REVIEW=3; LOW=4 }
+$sorted = @($findings | Sort-Object @{
+  Expression = { $s=[string]$_.sev; if($ord.ContainsKey($s)){$ord[$s]}else{9} }
+}, env, surface)
+
+# ── Build CSV ────────────────────────────────────────────────────────────────
+$csvPath = "$dir\daily-SOC-noskill-$dateStr.csv"
+$pdfPath = "$dir\daily-SOC-noskill-$dateStr.pdf"
+
+$rowList = [System.Collections.Generic.List[psobject]]::new()
+foreach ($r in $sorted) {
+  $confN = 0; try { $confN = [int]([string]$r.confidence) } catch {}
+  if ($confN -eq 0) {
+    # field absent or unparseable — derive a default from severity so the column is never blank
+    $confN = switch ([string]$r.sev) { 'CRITICAL'{4} 'HIGH'{4} 'MEDIUM'{3} 'REVIEW'{2} 'LOW'{2} default{2} }
+  }
+  $confPct = if ($confN -gt 5) { "$([math]::Min($confN,100))%" } elseif ($confN -gt 0) { "$($confN * 20)%" } else { '' }
+  $rowList.Add([pscustomobject]@{
+    'Severity'            = [string]$r.sev
+    'Streams'             = $(if([string]$r.surface -eq 'edr'){'ESET'}else{[string]$r.surface})
+    'Environment'         = [string]$r.env
+    'Source'              = [string]$r.source
+    'Finding'             = [string]$r.finding
+    'MITRE'               = [string]$r.mitre
+    'Tactic'              = [string]$r.tactic
+    'Kill Chain'          = [string]$r.killchain
+    'Graylog Query Used'  = [string]$r.query
+    'Confidence Level'    = $confPct
+    'Action Required'     = [string]$r.action
+  })
+}
+
+$rowList | Export-Csv -Path $csvPath -NoTypeInformation -Encoding utf8 -Force
+Write-Output "CSV written: $csvPath ($($rowList.Count) row(s))"
+
+# ── Count summary for email body ──────────────────────────────────────────────
+$cnts = @{ CRITICAL=0; HIGH=0; MEDIUM=0; REVIEW=0; LOW=0 }
+foreach ($r in $findings) { $s=[string]$r.sev; if ($cnts.ContainsKey($s)) { $cnts[$s]++ } }
+
+$postureText = if($cnts.CRITICAL -gt 0) { "ACTION REQUIRED - $($cnts.CRITICAL) CRITICAL finding(s)" } `
+               elseif($cnts.HIGH -gt 0)  { "REVIEW - $($cnts.HIGH) HIGH finding(s)" } `
+               else                       { "NOMINAL - no CRITICAL or HIGH findings" }
+
+$topLines = ($sorted |
+  Where-Object { ([string]$_.sev) -in 'CRITICAL','HIGH','MEDIUM' } |
+  Select-Object -First 5 |
+  ForEach-Object {
+    $kc = [string]$_.killchain
+    $kcTag = if($kc){ " [$kc]" } else { '' }
+    "  - [$([string]$_.sev)]$kcTag $([string]$_.env)/$([string]$_.surface): $([string]$_.action)"
+  }) -join "`r`n"
+if (-not $topLines) { $topLines = '  (no HIGH/MEDIUM findings)' }
+
+# -- Outlook-safe HTML email body: environment x severity count matrix only --
+# Table layout + inline colors + square corners + no JS, so it renders in Outlook
+# desktop (Word engine), new Outlook, Outlook web, Gmail and Apple Mail. Detail
+# lives in the attached PDF + workbook, not the body.
+$rowEnvs  = 'PROD-GL','AZ-GL','DEV-GL','OP-GL'
+$sevOrder = 'CRITICAL','HIGH','MEDIUM','LOW','REVIEW'
+$sevHdr   = @{CRITICAL='Critical';HIGH='High';MEDIUM='Medium';LOW='Low';REVIEW='Review'}
+$cellBg   = @{CRITICAL='#F09595';HIGH='#F7C1C1';MEDIUM='#FAC775';LOW='#B5D4F4';REVIEW='#D3D1C7'}
+$cellTx   = @{CRITICAL='#501313';HIGH='#791F1F';MEDIUM='#633806';LOW='#0C447C';REVIEW='#444441'}
+
+# tally env x severity (correlation / multi-env findings fall under 'Cross-env' so totals reconcile)
+$mat=@{}
+foreach ($f in $findings) {
+  $e=[string]$f.env; if ($rowEnvs -notcontains $e) { $e='Cross-env' }
+  $s=[string]$f.sev
+  if (-not $mat.ContainsKey($e)) { $mat[$e]=@{} }
+  $mat[$e][$s]=[int]$mat[$e][$s]+1
+}
+$displayEnvs=@($rowEnvs); if ($mat.ContainsKey('Cross-env')) { $displayEnvs+='Cross-env' }
+
+$hdrCells=''
+foreach ($s in $sevOrder) { $hdrCells+=('<th style="background:#F1EFE8;color:#444441;padding:7px 9px;border:1px solid #D3D1C7;font-weight:bold;">'+$sevHdr[$s]+'</th>') }
+
+$rowsHtml=''
+foreach ($e in $displayEnvs) {
+  $rowsHtml+=('<tr><td style="padding:7px 9px;border:1px solid #D3D1C7;font-weight:bold;color:#2C2C2A;">'+$e+'</td>')
+  $rt=0
+  foreach ($s in $sevOrder) {
+    $n=0; if ($null -ne $mat[$e]) { $n=[int]$mat[$e][$s] }; $rt+=$n
+    $bg=if($n){$cellBg[$s]}else{'#F7F6F2'}; $tx=if($n){$cellTx[$s]}else{'#B4B2A9'}; $fw=if($n){'bold'}else{'normal'}; $v=if($n){"$n"}else{'&middot;'}
+    $rowsHtml+=('<td style="text-align:center;padding:7px 9px;border:1px solid #D3D1C7;background:'+$bg+';color:'+$tx+';font-weight:'+$fw+';">'+$v+'</td>')
+  }
+  $rowsHtml+=('<td style="text-align:center;padding:7px 9px;border:1px solid #D3D1C7;background:#F1EFE8;font-weight:bold;color:#2C2C2A;">'+$rt+'</td></tr>')
+}
+$totRow='<tr><td style="padding:7px 9px;border:1px solid #D3D1C7;background:#444441;color:#ffffff;font-weight:bold;">All</td>'
+foreach ($s in $sevOrder) { $n=@($findings | Where-Object { [string]$_.sev -eq $s }).Count; $v=if($n){"$n"}else{'&middot;'}; $totRow+=('<td style="text-align:center;padding:7px 9px;border:1px solid #D3D1C7;background:#444441;color:#ffffff;font-weight:bold;">'+$v+'</td>') }
+$totRow+=('<td style="text-align:center;padding:7px 9px;border:1px solid #D3D1C7;background:#2C2C2A;color:#ffffff;font-weight:bold;">'+$findings.Count+'</td></tr>')
+
+$badge=if($cnts.CRITICAL -gt 0){'ACTION REQUIRED &middot; '+$cnts.CRITICAL+' CRITICAL'}elseif($cnts.HIGH -gt 0){'ACTION REQUIRED &middot; '+$cnts.HIGH+' HIGH'}else{'NOMINAL'}
+$badgeBg=if($cnts.CRITICAL -gt 0 -or $cnts.HIGH -gt 0){'#F7C1C1'}else{'#C0DD97'}
+$badgeTx=if($cnts.CRITICAL -gt 0 -or $cnts.HIGH -gt 0){'#791F1F'}else{'#27500A'}
+
+$body = @"
+<div style="font-family:Arial,Helvetica,sans-serif;color:#2C2C2A;max-width:660px;">
+<table style="width:100%;border-collapse:collapse;"><tr>
+<td style="font-size:17px;font-weight:bold;color:#2C2C2A;">SOC daily hunt &mdash; $dateStr</td>
+<td style="text-align:right;"><span style="font-size:12px;font-weight:bold;background:$badgeBg;color:$badgeTx;padding:4px 10px;">$badge</span></td>
+</tr></table>
+<p style="font-size:12px;color:#5F5E5A;margin:4px 0 16px;">24-hour hunt across AZ-GL, PROD-GL, DEV-GL, OP-GL &middot; $($findings.Count) findings</p>
+<table style="width:100%;border-collapse:collapse;font-size:13px;">
+<tr><th style="text-align:left;background:#F1EFE8;color:#444441;padding:7px 9px;border:1px solid #D3D1C7;font-weight:bold;">Environment</th>$hdrCells<th style="background:#444441;color:#ffffff;padding:7px 9px;border:1px solid #D3D1C7;font-weight:bold;">Total</th></tr>
+$rowsHtml
+$totRow
+</table>
+<p style="font-size:12px;color:#5F5E5A;margin:16px 0 0;">Full findings (who/what/when/where, evidence, MITRE and paste-ready queries) are in the attached PDF report and SOC workbook.</p>
+<p style="font-size:11px;color:#888780;margin:12px 0 0;">Casepoint SOC &middot; automated daily hunt</p>
+</div>
+"@
+
+$subject = "SOC No-Skill $dateStr - $postureText"
+
+# ── Send email ────────────────────────────────────────────────────────────────
+$mailParams = @{
+  From       = $fromAddr
+  To         = $toAddr
+  Subject    = $subject
+  Body       = $body
+  BodyAsHtml = $true
+  SmtpServer = $smtpHost
+  Port       = $smtpPort
+}
+# Build/refresh the consolidated multi-tab workbook (one date tab per daily CSV), then attach workbook + PDF.
+$xlsxPath = "$dir\SOC-noskill-report.xlsx"
+try { & "$proj\build-report-workbook.ps1" } catch { Write-Output "WARN: workbook build failed: $($_.Exception.Message)" }
+$attachments = @()
+if (Test-Path $xlsxPath) { $attachments += $xlsxPath }
+elseif ($findings.Count -gt 0 -and (Test-Path $csvPath)) { $attachments += $csvPath; Write-Output "NOTE: workbook missing - attached single-day CSV instead" }
+if (Test-Path $pdfPath) { $attachments += $pdfPath } else { Write-Output "NOTE: PDF not found at $pdfPath - run generate-pdf-noskill.ps1 first" }
+if ($attachments.Count -gt 0) { $mailParams['Attachments'] = $attachments }
+
+# Channel-only mode (set by the 19:00 test cmd): CSV + workbook are already built above;
+# skip the email send so we don't bounce off the IP-blocked relay (MTSMTP01) or deliver
+# junk via the MX fallback. Unset SOC_SKIP_EMAIL (the normal 04:00 run never sets it) to
+# restore email once the relay is allow-listed or an O365 app-password is wired.
+if ($env:SOC_SKIP_EMAIL -eq '1') {
+  Write-Output "SOC_SKIP_EMAIL=1 - CSV + workbook built; email send SKIPPED (channel-only mode). Would have attached: $($attachments -join ', ')"
+  exit 0
+}
+
+# == PREFERRED: Power Automate email flow (authenticated O365 connector -> Inbox) ==
+# Bypasses the IP-blocked MTSMTP01 relay entirely. No IT/admin needed: in your own
+# Power Automate, create an Instant flow (trigger "When an HTTP request is received"
+# -> action Office 365 Outlook "Send an email (V2)"), then save its POST URL in
+# .email-flow-url. Until that file exists this block is skipped and the SMTP
+# fallback below runs exactly as before (so this change is a safe no-op today).
+$emailFlowFile = "$proj\.email-flow-url"
+$flowSent = $false
+if (Test-Path $emailFlowFile) {
+  try {
+    $flowUrl = (Get-Content $emailFlowFile -Raw -Encoding utf8).Trim()
+    $pdfB64  = if (Test-Path $pdfPath)  { [Convert]::ToBase64String([IO.File]::ReadAllBytes($pdfPath)) }  else { '' }
+    $xlsxB64 = if (Test-Path $xlsxPath) { [Convert]::ToBase64String([IO.File]::ReadAllBytes($xlsxPath)) } else { '' }
+    $payload = @{
+      to             = $toAddr
+      subject        = $subject
+      bodyHtml       = $body
+      fileName       = (Split-Path $pdfPath -Leaf)
+      contentBase64  = $pdfB64
+      workbookName   = (Split-Path $xlsxPath -Leaf)
+      workbookBase64 = $xlsxB64
+    } | ConvertTo-Json -Depth 6 -Compress
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    Invoke-RestMethod -Uri $flowUrl -Method Post -ContentType 'application/json; charset=utf-8' -Body ([Text.Encoding]::UTF8.GetBytes($payload)) -TimeoutSec 60 | Out-Null
+    Write-Output "Email sent via Power Automate flow (.email-flow-url) -> $toAddr"
+    $flowSent = $true
+  } catch { Write-Output "Email flow POST failed: $($_.Exception.Message) - falling back to SMTP relay/MX" }
+}
+
+# == FALLBACK: on-prem relay (MTSMTP01) then tenant MX. Runs only when there is no
+# working .email-flow-url. Relay currently RSTs our source IP; MX delivers to Junk. ==
+$emailSentFlag = "$proj\logs-noskill\email-sent-$dateStr.txt"
+$emailSuccess  = $false
+
+if (-not $flowSent) {
+  try {
+    Send-MailMessage @mailParams -ErrorAction Stop
+    Write-Output "Email sent to $toAddr via $smtpHost`:$smtpPort"
+    $emailSuccess = $true
+  } catch {
+    Write-Output "ERROR sending email: $($_.Exception.Message)"
+    # Fallback: try the MX hostname in case IP routing fails
+    try {
+      $mailParams['SmtpServer'] = 'casepoint-in.mail.protection.outlook.com'
+      Send-MailMessage @mailParams -ErrorAction Stop
+      Write-Output "Email sent via MX fallback"
+      $emailSuccess = $true
+    } catch {
+      Write-Output "ERROR (MX fallback): $($_.Exception.Message)"
+    }
+  }
+} else {
+  $emailSuccess = $true
+}
+
+# Write success flag so gaps-rerun can detect if email was never delivered
+if ($emailSuccess) {
+  [IO.File]::WriteAllText($emailSentFlag, (Get-Date -Format o))
+  Write-Output "Email-sent flag written: $emailSentFlag"
+} else {
+  Write-Output "EMAIL NOT DELIVERED - gaps-rerun will retry email after stale surfaces covered"
+}

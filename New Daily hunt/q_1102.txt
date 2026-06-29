@@ -1,0 +1,1 @@
+﻿winlogbeat_winlog_event_id:1102 AND winlogbeat_winlog_channel:Security

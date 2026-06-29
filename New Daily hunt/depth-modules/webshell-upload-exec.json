@@ -1,0 +1,72 @@
+{
+  "module": "webshell-upload-exec",
+  "version": "1.0",
+  "technique": "Web shell upload then command execution on an IIS/APP host",
+  "mitre": ["T1505.003", "T1059", "T1190"],
+  "tactic": "TA0003 Persistence -> TA0002 Execution",
+  "surface": "iis",
+  "applies_to_gl": ["OP-GL", "PROD-GL", "AZ-GL", "DEV-GL"],
+  "trigger": {
+    "from_breadth": "An IIS/APP lead suggesting a web shell: a POST to a script-extension path (.aspx/.asp/.ashx/.php/.jsp/.cfm) returning 200; a known webshell filename in the URI (c99/r57/wso/b374k/cmd.aspx/shell.*/FilesMan); a path that was 404 earlier and is now 200 (newly dropped file); a POST to a static resource (.jpg/.png/.gif) returning 200; or webshell-interaction tokens (cmd=/eval=/exec=/whoami/net user/powershell) on a script URI.",
+    "entity": "web_path"
+  },
+  "telemetry_required": [
+    "IIS URI_Stream (path) + cs-method + Status + Client_ip (OP-GL parses these; PROD/AZ/DEV frequently NULL -> hunt the raw W3SVC message)",
+    "Server_Bytes / sc_bytes (response size) to size command output",
+    "Windows 4688 on the IIS host (w3wp child process) for execution confirmation"
+  ],
+  "telemetry_gap_behavior": "No file-integrity monitoring on IIS webroots, and PROD/AZ/DEV null the parsed URI/Status -> hunt the path/method/status in the raw W3SVC message. A parsed-field zero is NOT clean until the raw message is swept. If 4688 is unavailable on the host, execution can only be inferred from IIS response patterns -> note the KNOWN-GAP, never call clean.",
+  "inputs": { "web_path": "<suspected shell path>", "host": "<IIS host>", "client_ip": "<requester>", "window_seconds": 21600 },
+  "method": [
+    {
+      "step": 1,
+      "goal": "Identify the candidate shell file",
+      "compute": "URI_Stream with a script extension reached by POST returning 200, OR a known webshell filename, OR a path that flipped 404->200 inside the window. Record first-seen timestamp, method, status, and the requesting Client_ip(s)."
+    },
+    {
+      "step": 2,
+      "goal": "Confirm the WRITE / drop",
+      "compute": "POST/PUT to the path (or to an upload endpoint) returning 2xx; large cs_bytes (payload body). A script file now returning 200 that previously 404'd = dropped shell.",
+      "decision_input": "successful upload (2xx) of a script-extension file = web shell installed (Persistence)"
+    },
+    {
+      "step": 3,
+      "goal": "Confirm EXECUTION (the catch that separates a drop from an active shell)",
+      "compute": "subsequent GET/POST to the shell path carrying command params (cmd= / exec= / eval= / whoami / net+user / powershell / dir / type) returning 200; OR a script URI returning 200 with a tiny/odd response size (command output); OR a POST to a static .jpg/.png/.gif returning 200.",
+      "decision_input": "command interaction returning 200 = active, interacted-with web shell -> CRITICAL"
+    },
+    {
+      "step": 4,
+      "goal": "Attribution + scope",
+      "compute": "which Client_ip(s) reached the shell -> enrich via ioc-ip-reputation; what other paths those IPs touched; geo/ASN against the GEO-ACL",
+      "decision_input": "shell reached from a TI-malicious or non-ACL IP raises confidence"
+    },
+    {
+      "step": 5,
+      "goal": "Host blast radius",
+      "compute": "on the IIS host, did w3wp.exe spawn a child process (4688 with ParentProcessName w3wp.exe -> cmd.exe/powershell.exe)? did the shell account then move? ",
+      "decision_input": "w3wp spawning a shell = confirmed code execution on the server -> chain to lateral-movement if the account pivoted"
+    }
+  ],
+  "decision": {
+    "CRITICAL_conf5": "shell path returns 200 to command-execution params, OR a 404->200 script file is being interacted with, OR w3wp spawned a shell on the host",
+    "HIGH_conf4": "successful upload/drop (2xx) of a script-extension file but no command interaction observed yet",
+    "MEDIUM_conf3": "webshell filename / interaction pattern requested but blocked (403/404) = attempt (still reported)",
+    "FP_kill": "legitimate app endpoints that accept POST and return 200 (login, file-upload features) with NO command tokens and a normal response size; known dev/test deploys of new pages; Imperva / Site24x7 health UAs"
+  },
+  "false_positive_checks": [
+    "legitimate upload/import features of the app (baseline the endpoint; no command tokens, expected response size)",
+    "known-good script endpoints in the site's own baseline (a path that is always 200 is not a 404->200 flip)",
+    "OP-GL benign baseline: PAL SyncService.svc, UA Imperva (health), UA Site24x7 monitors",
+    "allow-listed scanners (Nessus/Tenable) hitting webshell-name paths during a scan"
+  ],
+  "evidence_capture": ["host", "web_path", "method", "status", "client_ip", "first_seen_ts", "command_tokens", "response_bytes", "w3wp_child_proc", "ti_verdict"],
+  "output_findings_json": {
+    "surface": "iis",
+    "source": "web",
+    "mitre": "T1505.003, T1059, T1190",
+    "tactic": "TA0003 Persistence",
+    "killchain": "Exploitation -> Installation",
+    "query_template": "<the IIS path/method/status query that fired> ; confirm exec = same path with cmd/whoami/powershell params returning 200"
+  }
+}

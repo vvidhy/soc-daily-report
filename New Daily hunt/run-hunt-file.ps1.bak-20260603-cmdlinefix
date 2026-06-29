@@ -1,0 +1,32 @@
+# Runs ONE hunt for the 08:00 (skill-aware) pipeline from a prompt FILE, so a prompt
+# too large to fit inline in daily-report.cmd (the ~8191-char cmd-forward limit) can
+# still be used. SKILL-AWARE: does NOT pass --disallowed-tools Skill, so the prompt's
+# own "use the skill if available; otherwise MCP" instruction governs.
+#
+# LOGGING: writes ONLY to stdout/stderr (claude's output flows straight through). The
+# CALLER owns the log via `>> daily.log 2>&1`. Do NOT Add-Content to daily.log here
+# (double-writer IOException - the 2026-06-02 no-skill bug).
+param(
+  [Parameter(Mandatory=$true)][string]$PromptFile,
+  [string]$Model='opus'
+)
+$ErrorActionPreference='Continue'
+$claude='C:\Users\VidhyaV\AppData\Roaming\npm\claude.cmd'
+$mcp='C:\Users\VidhyaV\soc-monitor\.mcp.json'
+
+if(-not (Test-Path $PromptFile)){ Write-Output "run-hunt-file: missing prompt file $PromptFile"; exit 2 }
+$prompt = Get-Content $PromptFile -Raw
+$label  = [IO.Path]::GetFileNameWithoutExtension($PromptFile)
+Write-Output "==== HUNT [$label] model=$Model $(Get-Date -Format o) ===="
+
+$claudeArgs = @(
+  '-p', $prompt,
+  '--model', $Model,
+  '--permission-mode','bypassPermissions',
+  '--mcp-config', $mcp,
+  '--strict-mcp-config',
+  '--max-turns','200'
+)
+
+# Empty stdin (mimics the original "< NUL") so -p never blocks waiting on input.
+$null | & $claude @claudeArgs

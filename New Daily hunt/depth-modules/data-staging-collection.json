@@ -1,0 +1,68 @@
+{
+  "module": "data-staging-collection",
+  "version": "1.0",
+  "technique": "Data staging / collection before exfiltration (archive creation, bulk repository access)",
+  "mitre": ["T1560", "T1005", "T1213", "T1114", "T1039"],
+  "tactic": "TA0009 Collection",
+  "surface": "windows",
+  "applies_to_gl": ["PROD-GL", "OP-GL", "AZ-GL", "DEV-GL"],
+  "trigger": {
+    "from_breadth": "4688 archive tooling creating a large/odd-location archive (7z/7za/rar/winrar/tar/Compress-Archive/makecab) in temp/AppData/ProgramData/Public; OR Azure/M365 audit showing mass SharePoint/OneDrive download, mailbox export, or eDiscovery by one principal; OR an IIS data endpoint serving bulk bytes to one client. Chains from a compromise and FEEDS data-exfil-volumetric.",
+    "entity": "account_or_host"
+  },
+  "telemetry_required": [
+    "winlogbeat_winlog_event_id:4688 + message (CommandLine) for archive tools",
+    "Azure audit operations (properties_* twins) for SharePoint/OneDrive/mailbox bulk access",
+    "IIS Server_Bytes / sc_bytes on /download|/export|/api/document endpoints"
+  ],
+  "telemetry_gap_behavior": "SMB-share access auditing (5140/5145) is OFF -> T1039 collection-from-network-share is largely blind; rely on 4688 archive tooling + Azure M365 audit + IIS bulk-download instead, and note the share-access gap. If a byte field is null, sweep the raw message. Absent = KNOWN-GAP, never clean.",
+  "inputs": { "entity": "<account or host>", "window_seconds": 3900, "baseline_window_seconds": 604800 },
+  "method": [
+    {
+      "step": 1,
+      "goal": "Archive / staging detection",
+      "query": "winlogbeat_winlog_event_id:4688 AND winlogbeat_winlog_channel:Security AND message:(\"7z\" OR \"7za\" OR \"rar\" OR \"winrar\" OR \"tar \" OR \"Compress-Archive\" OR \"makecab\")",
+      "compute": "tool, output path + extension, and (where present) size; flag archives written to temp/AppData/ProgramData/Public or named like data/backup/export/dump",
+      "decision_input": "a large archive staged in a temp/odd location by a non-backup process = collection for exfil"
+    },
+    {
+      "step": 2,
+      "goal": "Bulk repository / mailbox access (cloud collection)",
+      "compute": "Azure/M365 audit for one principal: mass FileDownloaded / FileSyncDownloaded (SharePoint/OneDrive), New-MailboxExportRequest, eDiscovery search-export, unusually many distinct documents in the window",
+      "decision_input": "bulk download/export from a repository or mailbox in a short window = data collection (T1213/T1114)"
+    },
+    {
+      "step": 3,
+      "goal": "Entity + timing correlation",
+      "compute": "tie the staging/collection to one entity; is it off-hours; did it follow a compromise / recon for this entity?",
+      "decision_input": "compromise/recon -> collection = the pre-exfil sequence"
+    },
+    {
+      "step": 4,
+      "goal": "Exfil linkage",
+      "compute": "does the same entity show up in data-exfil-volumetric this run (large outbound right after staging)?",
+      "decision_input": "collection -> volumetric egress = confirmed staging-then-exfil -> escalate the chain to CRITICAL"
+    }
+  ],
+  "decision": {
+    "CRITICAL_conf5": "staging/collection by an entity that ALSO has a data-exfil-volumetric hit this run (collection -> exfil chain), or that follows a confirmed compromise",
+    "HIGH_conf4": "large archive staged in temp by a non-backup process, OR bulk repository/mailbox export, with no business explanation",
+    "MEDIUM_conf3": "archive or bulk-access activity that may be a legitimate workflow - review against the entity baseline",
+    "FP_kill": "scheduled backup / DB-dump / log-rotation jobs that archive by design; developer build artifacts (CI); known data-export business processes; admin migration tasks in a change window"
+  },
+  "false_positive_checks": [
+    "backup / DB-dump / log-archival jobs (confirm via the account baseline + schedule)",
+    "CI/build pipelines producing artifacts (dev/build hosts)",
+    "known business export/reporting workflows (e.g., scheduled report generation)",
+    "Cato egress 140.82.202.196 / 199.27.40.187 / 123.253.153.138 as the destination of any follow-on transfer -> cap unless paired with a compromise"
+  ],
+  "evidence_capture": ["entity", "archive_tool", "archive_path", "archive_size", "bulk_access_source", "doc_count", "off_hours", "preceding_compromise", "linked_exfil", "first_ts", "last_ts"],
+  "output_findings_json": {
+    "surface": "windows",
+    "source": "host",
+    "mitre": "T1560, T1005, T1213, T1114",
+    "tactic": "TA0009 Collection",
+    "killchain": "Actions on Objectives",
+    "query_template": "winlogbeat_winlog_event_id:4688 AND message:(\"7z\" OR \"rar\" OR \"Compress-Archive\" OR \"makecab\")"
+  }
+}

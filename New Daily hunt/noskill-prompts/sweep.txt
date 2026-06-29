@@ -1,0 +1,94 @@
+Run one 15-minute SOC triage sweep across all 4 Graylogs. Call mcp__AZ-GL__ / mcp__PROD-GL__ / mcp__DEV-GL__ / mcp__OP-GL__ tools directly — no subagents, no Skill tool.
+
+MISSION: Fast statistical triage using aggregations only — no raw log drilling (that is the hourly hunt's job). Spot volume anomalies, new/unknown entities, unusual distributions, and sudden spikes. Anything that looks wrong gets an ESCALATE marker; the hourly Sonnet hunt will drill deeper.
+
+WINDOW: rangeSeconds 960 (16 minutes) on every aggregate call.
+
+=== OPERATIONAL RULES ===
+(a) AGGREGATE ONLY. Do NOT call search_logs_relative or search_logs_absolute in this sweep. Use aggregate_logs exclusively. Counts and distributions are enough to triage.
+(b) RESILIENCE. If an MCP call fails, retry once. DEV-GL (siem.casepoint.in) is TLS-flaky — retry almost always succeeds. If retry also fails, emit sev=REVIEW finding "gl-unreachable: <GL>" and continue. Never skip a GL silently.
+(c) EVIDENCE FORMAT. Every finding must cite actual aggregate results: "GL:<name> | field:<field_name> | top_value:<value> | count:<n> | window:16min". No narrative without numbers.
+(d) No finding without evidence. If aggregates return zero rows, say so — zero is a result.
+(e) COVER ALL 4 GLs: AZ-GL, PROD-GL, DEV-GL, OP-GL. Never skip one.
+
+=== STATE FILE ===
+Path: C:\Users\VidhyaV\.claude\state\realtime-monitor-highwater.json
+- Read it at start to get last-seen timestamps per GL.
+- At the end, write the newest timestamp observed per GL back to this file using the Write tool.
+- After writing, print one line starting with: STATE_WRITTEN: <json>
+
+=== DETECTION APPROACH — AI-DRIVEN (no pre-defined queries) ===
+For each GL, run 3-4 aggregate calls covering different dimensions, then reason as a security analyst about what the distributions reveal.
+
+STEP 1 — AGGREGATE KEY DIMENSIONS (per GL)
+Choose aggregations relevant to what that GL receives. Examples — pick what fits:
+  - Top source IPs by event count: aggregate_logs field=source or Client_ip or srcip
+  - Event type / event ID distribution: aggregate_logs field=winlog_event_id or application_name or action
+  - Error / failure distribution: aggregate_logs field=Status or level or result_code
+  - Top usernames / UPNs: aggregate_logs field=TargetUserName or userPrincipalName or linux_user
+  - Top destinations / ports: aggregate_logs field=dstip or dstport
+  - Top hostnames / servers: aggregate_logs field=source or host or computer
+
+Do NOT hardcode specific event IDs or attack signatures. Let the distribution itself tell you what stands out.
+
+STEP 2 — REASON OVER DISTRIBUTIONS
+After getting aggregates, think as a security analyst:
+  - Is any single IP, user, or host dominating the count far above others? (burst, scan, spray)
+  - Does the event-type distribution look skewed toward failures, denials, or errors?
+  - Is there an entity (IP, user, hostname) appearing for the first time in this window?
+  - Does volume look significantly higher or lower than the surrounding GL's typical baseline?
+  - Are there combinations across two aggregates that together look suspicious even if each alone seems fine? (e.g. new IP + failure burst)
+  - For firewall/network streams: is any single source generating deny counts orders of magnitude above peers?
+  - For Windows streams: is any event ID that is typically rare suddenly appearing frequently?
+  - For Azure/auth streams: is any UPN or IP showing failure counts that suggest a spray or stuffing attempt?
+
+You decide what is suspicious — the aggregations are your raw material, your security knowledge is the detector.
+
+STEP 3 — FOLLOW-UP AGGREGATES (optional, only if step 2 flags something)
+If you spot something worth confirming, run one additional targeted aggregate to either confirm or dismiss it. Example: if one IP dominates source count, check if it also dominates failure events. Do not drill into raw logs — stay in aggregate space.
+
+=== ALLOW-LIST (never auto-escalate these, cap at LOW unless volume is extraordinary) ===
+- Cato egress IPs: 140.82.202.196 / 199.27.40.187 / 123.253.153.138 — Casepoint's own outbound traffic
+- Nessus/Tenable scanners: 10.102.100.199 / 10.101.100.160 / 10.250.100.77 / 10.220.100.199 — internal vuln scans
+- Linux noise strings in raw message: jndi, ceurufrd — known benign artifacts at Casepoint
+- Azure result codes 70043/70044/50173/50140 — routine token refresh and keep-me-signed-in
+
+=== OUTPUT FORMAT — MANDATORY, EXACT SYNTAX ===
+Your output must contain ONLY the structured lines below — no markdown headers, no bullet points, no narrative paragraphs.
+A downstream script parses ALERT: and ESCALATE: lines by exact prefix match. Markdown output is silently dropped and no alert is sent.
+
+REQUIRED OUTPUT LINES (one per finding):
+
+1. For every MEDIUM / HIGH / CRITICAL finding — print this EXACT format, one line per finding:
+   ALERT: <SEV> | <GL> | <stream/surface> | <what in plain English> | <evidence: field=value count=N>
+   Example: ALERT: HIGH | OP-GL | IIS_PROD | 38.120.135.35 burst 977 HTTP 401s across 76 FOIA portals | Client_ip=38.120.135.35 count=977
+
+2. For every HIGH or CRITICAL finding — ALSO print:
+   ESCALATE: <env> | <host_or_user_or_ip> | <reason> | <anchor: field=value>
+   Example: ESCALATE: OP-GL | 38.120.135.35 | 977 auth failures across 76 FOIA portals no UA | Client_ip=38.120.135.35 count=977
+
+3. One coverage line per GL (always, even if clean):
+   GL: <name>: <n> aggregates run, <finding_count> findings, highest_sev=<sev>
+   Example: GL: OP-GL: 4 aggregates run, 1 findings, highest_sev=HIGH
+
+4. At the very end — write updated state file with Write tool, then print:
+   STATE_WRITTEN: <json>
+
+NO OTHER OUTPUT. Do not write markdown, headers, bullet points, tables, or explanatory text — even if all GLs are clean.
+Every finding must be on its own ALERT: line. If you write a paragraph instead of an ALERT: line, the alert will not be delivered.
+
+CLEAN TICK EXAMPLE (what your ENTIRE output looks like when nothing is anomalous):
+GL: AZ-GL: 4 aggregates run, 0 findings, highest_sev=CLEAN
+GL: PROD-GL: 4 aggregates run, 0 findings, highest_sev=CLEAN
+GL: OP-GL: 3 aggregates run, 0 findings, highest_sev=CLEAN
+GL: DEV-GL: 4 aggregates run, 0 findings, highest_sev=CLEAN
+STATE_WRITTEN: {"AZ-GL":"2026-06-19T12:31:00.000Z","PROD-GL":"...","OP-GL":"...","DEV-GL":"..."}
+
+That is the complete output. No summary paragraph. No "Overall verdict". No tables. No bullet points. Just those lines.
+
+Severity scale: CRITICAL / HIGH / MEDIUM / REVIEW / LOW / CLEAN
+- CRITICAL: active confirmed attack (failure + success same IP/user in window)
+- HIGH: strong anomaly needing immediate drill-down (burst, new entity, unusual pattern)
+- MEDIUM: statistical outlier worth noting
+- REVIEW: ambiguous, needs human look
+- LOW / CLEAN: allow-listed noise or nothing anomalous

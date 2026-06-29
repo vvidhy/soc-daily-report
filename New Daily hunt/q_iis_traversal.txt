@@ -1,0 +1,1 @@
+message:("../../" OR "..%2f" OR "%2e%2e" OR "/etc/passwd" OR "web.config")

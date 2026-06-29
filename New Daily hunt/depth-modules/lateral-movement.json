@@ -1,0 +1,69 @@
+{
+  "module": "lateral-movement",
+  "version": "1.0",
+  "technique": "Lateral movement - one identity/host spreading across multiple destination hosts (remote services, admin shares, remote exec)",
+  "mitre": ["T1021.001", "T1021.002", "T1021.006", "T1570", "T1550"],
+  "tactic": "TA0008 Lateral Movement",
+  "surface": "windows",
+  "applies_to_gl": ["PROD-GL", "OP-GL", "AZ-GL", "DEV-GL"],
+  "trigger": {
+    "from_breadth": "An account or source host that (a) produces network/remote logons (4624 type 3 or type 10) to >=3 DISTINCT destination hosts in the window, OR (b) shows 4648 explicit-credential logons across hosts, OR (c) 4688 remote-exec tooling (psexec / wmic / winrm / wsmprovhost), OR (d) 7045 service install on a host it just logged into. Also chains from a confirmed compromise (credential-stuffing-pivot / rdp brute success) -> trace where that identity went next.",
+    "entity": "account_or_source_host"
+  },
+  "telemetry_required": [
+    "winlogbeat_winlog_event_id (4624/4648/4672/4688/7045) + winlogbeat_winlog_channel:Security",
+    "winlogbeat_winlog_event_data_TargetUserName / SubjectUserName / LogonType / IpAddress / WorkstationName",
+    "winlogbeat_winlog_computer_name (the destination host) ; 4688 message (CommandLine)"
+  ],
+  "telemetry_gap_behavior": "KNOWN-GAP, never 'clean': there is NO Sysmon and SMB-share (5140/5145) + Kerberos-service-ticket (4769) + PowerShell script-block auditing are OFF on these hosts (see windows-winlogbeat-telemetry-reality). So Pass-the-Hash, Pass-the-Ticket, SMB-relay and named-pipe lateral are largely TELEMETRY-BLIND. Detect what 4624/4648/4688/7045 DO expose; where a technique is blind, emit a KNOWN-GAP note + a detection-improvement recommendation, never a clean verdict. ESET carries some LSASS/injection signal - cross-check it for credential-theft that precedes lateral movement.",
+  "inputs": { "entity": "<account UPN/SAM or source host>", "window_seconds": 3900, "pivot_window_seconds": 21600 },
+  "method": [
+    {
+      "step": 1,
+      "goal": "Fan-out count - distinct destination hosts this identity authenticated to",
+      "query": "winlogbeat_winlog_event_id:4624 AND winlogbeat_winlog_channel:Security AND winlogbeat_winlog_event_data_LogonType:(3 OR 10) AND winlogbeat_winlog_event_data_TargetUserName:\"<account>\"",
+      "compute": "distinct winlogbeat_winlog_computer_name (destinations); distinct source IpAddress/WorkstationName; LogonType split (3=network/SMB-or-WMI, 10=RDP)",
+      "decision_input": ">=3 distinct destinations in the window from one account = spread; >=5 or rapid (minutes apart) = strong lateral"
+    },
+    {
+      "step": 2,
+      "goal": "Explicit-credential reuse (runas / alternate creds across hosts)",
+      "query": "winlogbeat_winlog_event_id:4648 AND winlogbeat_winlog_channel:Security AND winlogbeat_winlog_event_data_SubjectUserName:\"<account>\"",
+      "compute": "distinct target servers + target user names; 4648 to many hosts = credential reuse / over-pass-the-hash signal",
+      "decision_input": "4648 from one source to multiple distinct targets = deliberate credential reuse (lateral), not normal interactive logon"
+    },
+    {
+      "step": 3,
+      "goal": "Remote-exec tooling + remote service install",
+      "query": "(winlogbeat_winlog_event_id:4688 AND message:(\"psexec\" OR \"psexesvc\" OR \"wmic\" OR \"wmiprvse\" OR \"winrm\" OR \"wsmprovhost\" OR \"sc.exe\" OR \"\\\\\\\\\")) OR (winlogbeat_winlog_event_id:7045)",
+      "compute": "for each hit: host, account, the CommandLine / service name + binary path; a service whose binary is in a temp/odd path or a one-off random name = PsExec-style lateral",
+      "decision_input": "remote-exec tool or remote 7045 service-install on a host the account just logged into = confirmed lateral mechanism (T1021/T1570)"
+    },
+    {
+      "step": 4,
+      "goal": "Privilege + timing correlation",
+      "compute": "4672 (special-privilege) on the destinations? did the fan-out start right AFTER a flagged compromise (cred-stuffing / RDP brute success / impossible-travel) for this identity? off-hours?",
+      "decision_input": "compromise -> fan-out within minutes = the post-exploitation lateral phase -> escalate the whole chain to CRITICAL"
+    }
+  ],
+  "decision": {
+    "CRITICAL_conf5": "fan-out to >=3 hosts that begins right after a confirmed compromise of the same identity, OR remote-exec tooling / 7045 install on a newly-accessed host",
+    "HIGH_conf4": "one account to >=5 distinct destinations (4624 type 3/10) in the window with no business explanation, OR 4648 credential reuse across multiple hosts",
+    "MEDIUM_conf3": "3-4 distinct destinations or isolated remote-exec that may be admin activity - report for review with the KNOWN-GAP caveat that PtH/PtT would be invisible",
+    "FP_kill": "vuln scanners (Nessus/Tenable 10.102.100.199 / 10.101.100.160 / 10.250.100.77 / 10.220.100.199), SCCM/patch/backup/monitoring service accounts that legitimately touch many hosts, admin jump-box during a change window - confirm against the known service-account + scanner allow-list"
+  },
+  "false_positive_checks": [
+    "Nessus/Tenable scanners and known monitoring/SCCM/backup service accounts fan out to many hosts by design -> allow-list, escalate only on admin action or off-hours",
+    "domain controllers and management servers normally receive type-3 logons from many sources -> count by SOURCE identity spreading OUT, not destinations receiving",
+    "a single admin doing legitimate multi-host maintenance in a change window (corroborate with the ticket / business hours)"
+  ],
+  "evidence_capture": ["entity", "distinct_destinations", "destination_hosts", "logon_types", "source_ip", "4648_targets", "remote_exec_tool", "service_install", "preceding_compromise", "first_ts", "last_ts", "known_gap_note"],
+  "output_findings_json": {
+    "surface": "windows",
+    "source": "host",
+    "mitre": "T1021, T1570, T1550",
+    "tactic": "TA0008 Lateral Movement",
+    "killchain": "Actions on Objectives",
+    "query_template": "winlogbeat_winlog_event_id:4624 AND winlogbeat_winlog_event_data_LogonType:(3 OR 10) AND winlogbeat_winlog_event_data_TargetUserName:\"<account>\""
+  }
+}

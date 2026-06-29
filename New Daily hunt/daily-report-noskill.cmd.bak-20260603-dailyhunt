@@ -1,0 +1,42 @@
+@echo off
+rem ============================================================
+rem  NO-SKILL (MCP-only) SOC daily pipeline. Each hunt's prompt
+rem  lives in noskill-prompts\<key>.txt and is run via
+rem  run-noskill-hunt.ps1 (single source of truth, shared with
+rem  the retry pass). Skill tool is disabled per hunt.
+rem ============================================================
+cd /d "C:\Users\VidhyaV\soc-monitor"
+echo ==== NOSKILL DAILY REPORT %DATE% %TIME% ==== >> "logs-noskill\daily.log"
+type nul > "logs-noskill\run-start.flag"
+start "SOC-noskill-watchdog" /b powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Users\VidhyaV\soc-monitor\hunt-watchdog-noskill.ps1"
+
+rem ---- First pass: 8 surface hunts ----
+call :hunt iis
+call :hunt rdp
+call :hunt azure
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$log=Get-Content 'C:\Users\VidhyaV\soc-monitor\logs-noskill\daily.log' -Raw; $i=$log.LastIndexOf('===AZURE-OUTPUT-START==='); $az=if($i -ge 0){$log.Substring($i)}else{''}; $f='C:\Users\VidhyaV\soc-monitor\reports-noskill\azure-latest.md'; $flag=(Get-Item 'C:\Users\VidhyaV\soc-monitor\logs-noskill\run-start.flag').LastWriteTime; if((-not (Test-Path $f)) -or ((Get-Item $f).LastWriteTime -lt $flag)){ if($az -match 'findings-json'){ [IO.File]::WriteAllText($f,$az); Write-Output 'AZURE FALLBACK: rebuilt azure-latest.md from captured log output' } else { Write-Output 'AZURE FALLBACK FAILED: no findings-json in azure output - manual check needed' } } else { Write-Output 'Azure wrote azure-latest.md normally' }" >> "logs-noskill\daily.log" 2>&1
+call :hunt linux
+call :hunt sftp
+call :hunt network
+call :hunt db
+call :hunt infra
+
+rem ---- Retry-before-report: re-run any STALE/MISSING surface ONCE ----
+powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Users\VidhyaV\soc-monitor\retry-stale-noskill.ps1" >> "logs-noskill\daily.log" 2>&1
+
+rem ---- Correlation (gated, downstream of the now-complete surface set) ----
+powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Users\VidhyaV\soc-monitor\prep-correlation-noskill.ps1" >> "logs-noskill\daily.log" 2>&1
+powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Users\VidhyaV\soc-monitor\correlation-gate-noskill.ps1" >> "logs-noskill\daily.log" 2>&1
+if not errorlevel 1 goto skipcorrelation
+call :hunt correlation
+:skipcorrelation
+
+rem ---- Build + deliver ----
+powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Users\VidhyaV\soc-monitor\generate-pdf-noskill.ps1" >> "logs-noskill\daily.log" 2>&1
+powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Users\VidhyaV\soc-monitor\send-report-noskill.ps1" >> "logs-noskill\daily.log" 2>&1
+echo. >> "logs-noskill\daily.log"
+goto :eof
+
+:hunt
+powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Users\VidhyaV\soc-monitor\run-noskill-hunt.ps1" -Key %1 >> "logs-noskill\daily.log" 2>&1
+goto :eof

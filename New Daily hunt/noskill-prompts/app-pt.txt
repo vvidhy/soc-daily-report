@@ -1,0 +1,19 @@
+Run a NOSKILL APP-PT hunt (pre-production / PT streams, application-layer only) for the last 24 hours. Hunt directly via the Graylog MCP tools only — do NOT invoke any skill. Query ONLY PROD-GL.
+
+NOTE ON SCOPE: Attack-signature detection (SQLi/XSS/RCE payloads, scanner UAs, brute-force by IP) on these streams is already covered by the iis hunt. This hunt covers ONLY application-layer signals the iis hunt cannot: authenticated user behaviour, privilege actions, and exfil. Do NOT re-run attack-signature or status-bucket queries.
+
+STREAMS: Read D:\Vidhya\New Daily hunt\infra-streams.json, use ONLY the app-pt category: OpexusPT (6822ac096cbdc0fdde3aaca7). IIS_PlatformPT and IIS_PlatformPT_vintasoft are raw IIS logs — those are covered exclusively by the iis hunt; do NOT query them here. AZ-GL, DEV-GL, OP-GL = Not applicable.
+
+WHAT TO HUNT (one aggregate per stream max):
+
+1. AUTH ANOMALIES BY USER: Aggregate 401/403 by Username (not IP — IP-level is in iis hunt). Flag: one Username with repeated 401s = account under attack; valid Username hitting 403 on sensitive paths = privilege escalation attempt; external or non-employee domain Username authenticating at all.
+
+2. EXFIL: Aggregate export / download / bulk-api endpoints by Username. Flag abnormal response bytes, non-browser UA on export paths, or high row counts relative to stream baseline.
+
+3. ADMIN ACTIONS: New user creation, role grants, password/MFA resets. Flag any admin action by unexpected Username or outside business hours.
+
+ALLOW-LIST: Cato egress (140.82.202.196, 199.27.40.187, 123.253.153.138) → MEDIUM. Nessus scanners → LOW unless out-of-profile. Internal IPs not automatically safe.
+
+TURN BUDGET: 10 turns max. One aggregate per stream × 3 streams = 3 turns; drill only on confirmed HIGH. If a stream does not respond promptly, emit REVIEW coverage-gap and move on.
+
+OUTPUT: Use the Write tool to save to reports-noskill\app-pt-latest.md. Structure: 4 sections (## AZ-GL, ## PROD-GL, ## DEV-GL, ## OP-GL; non-PROD = Not applicable). Append ```findings-json block. Keys: sev, env (always PROD-GL), surface (always "app"), finding, evidence, mitre, tactic, killchain, action, query, investigate. Plain ASCII only.

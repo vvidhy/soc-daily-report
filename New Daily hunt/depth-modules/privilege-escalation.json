@@ -1,0 +1,78 @@
+{
+  "module": "privilege-escalation",
+  "version": "1.0",
+  "technique": "Privilege escalation - account/host gaining rights it should not have (admin-group add, special-privilege grant, GPO/AdminSDHolder abuse, computer-account exploitation, AD CS)",
+  "mitre": ["T1078.002", "T1098", "T1484.001", "T1134", "T1548", "T1068"],
+  "tactic": "TA0004 Privilege Escalation",
+  "surface": "windows",
+  "applies_to_gl": ["PROD-GL", "OP-GL", "AZ-GL", "DEV-GL"],
+  "trigger": {
+    "from_breadth": "A privileged-group membership add (4728/4732/4756) to Domain Admins / Enterprise Admins / Administrators; OR 4672 special-privilege assignment for an account that does not normally hold it; OR 5136/4739 GPO / domain-policy / AdminSDHolder modification; OR computer-account anomalies (4742 DC machine-account password reset = Zerologon-style; 4741 machine-account create + 4781 rename = noPac); OR 4886/4887 AD CS certificate anomaly. Also chains from a confirmed compromise or recon -> did the foothold escalate?",
+    "entity": "account_or_computer_account"
+  },
+  "telemetry_required": [
+    "winlogbeat_winlog_event_id 4728/4732/4756 (group add), 4672/4673 (special privileges), 5136/4739 (DS object / domain policy modified), 4742/4741/4781 (computer account), 4886/4887 (AD CS cert request/issue)",
+    "winlogbeat_winlog_channel:Security + event_data SubjectUserName / TargetUserName / MemberName / GroupName"
+  ],
+  "telemetry_gap_behavior": "KNOWN-GAP, never clean: Kerberos 4768/4769 are DROPPED at collection -> AD CS cert-based auth escalation and Kerberos-driven escalation are PARTLY BLIND (detect the cert request/issue 4886/4887 and the group/privilege change, but not the ticket use). No Sysmon -> token manipulation (T1134), UAC bypass (T1548), and process injection (T1055) are BLIND -> lean on ESET LSASS/injection signal + 4672/4673, and RECOMMEND enabling Sysmon + DS-object-change auditing. If 5136 is not collected on a GL, note the AdminSDHolder/GPO-audit gap.",
+  "inputs": { "entity": "<account or computer account>", "window_seconds": 3900, "pivot_window_seconds": 21600 },
+  "method": [
+    {
+      "step": 1,
+      "goal": "Privileged-group escalation (highest fidelity)",
+      "query": "winlogbeat_winlog_event_id:(4728 OR 4732 OR 4756) AND winlogbeat_winlog_channel:Security",
+      "compute": "the added MemberName, the GroupName (is it Domain Admins / Enterprise Admins / Schema Admins / Administrators / Account Operators?), and the SubjectUserName who added it; was the added account previously non-privileged?",
+      "decision_input": "a non-privileged account added to a domain/forest admin group = direct privilege escalation -> CRITICAL"
+    },
+    {
+      "step": 2,
+      "goal": "First-seen admin privileges (UEBA rare-event)",
+      "query": "winlogbeat_winlog_event_id:4672 AND winlogbeat_winlog_channel:Security AND winlogbeat_winlog_event_data_SubjectUserName:\"<account>\"",
+      "compute": "does this account normally receive special (admin-equivalent) privileges at logon? first-ever 4672 for a standard user = newly-elevated",
+      "decision_input": "first-seen special-privilege assignment for an account that never had it = escalation signal (correlate with how it was granted)"
+    },
+    {
+      "step": 3,
+      "goal": "GPO / AdminSDHolder / domain-policy modification (T1484)",
+      "query": "winlogbeat_winlog_event_id:(5136 OR 4739) AND winlogbeat_winlog_channel:Security",
+      "compute": "which object was modified - a GPO (groupPolicyContainer), the AdminSDHolder container, or a protected/privileged object DACL? who modified it?",
+      "decision_input": "GPO or AdminSDHolder modification by a non-GPO-admin / non-tier0 account = stealth escalation / persistence -> CRITICAL"
+    },
+    {
+      "step": 4,
+      "goal": "Computer-account exploitation (Zerologon / noPac)",
+      "query": "winlogbeat_winlog_event_id:(4742 OR 4741 OR 4781) AND winlogbeat_winlog_channel:Security",
+      "compute": "4742 resetting a DOMAIN CONTROLLER machine-account password (esp. from a non-DC / anonymous source) = Zerologon-style; 4741 machine-account creation by a standard user + 4781 rename = noPac (CVE-2021-42278/42287)",
+      "decision_input": "DC machine-account password reset by a non-DC, or machine-account create+rename by a normal user, = CVE exploitation -> CRITICAL"
+    },
+    {
+      "step": 5,
+      "goal": "AD CS certificate abuse (ESC*) - partial (Kerberos auth blind)",
+      "query": "winlogbeat_winlog_event_id:(4886 OR 4887) AND winlogbeat_winlog_channel:Security",
+      "compute": "a certificate request/issue where the requester != the subject identity, or a privileged/any-purpose template used by a standard user (ESC1)",
+      "decision_input": "cert issued for another identity / privileged template to a normal user = AD CS escalation. NOTE: the subsequent cert-based logon (4768 w/ cert) is DROPPED -> flag the request/issue + KNOWN-GAP on the auth"
+    }
+  ],
+  "decision": {
+    "CRITICAL_conf5": "non-privileged account added to a domain/forest admin group; AdminSDHolder/GPO modified by a non-tier0 account; DC machine-account password reset (Zerologon); noPac machine-account create+rename; AD CS cert issued to a normal user for another identity",
+    "HIGH_conf4": "first-seen 4672 admin privileges for an account that never had them, correlated with a prior compromise/recon; GPO modification by a non-GPO-admin",
+    "MEDIUM_conf3": "an isolated privileged-group change or 4672 that may be legitimate admin/PIM activity - review against the change record",
+    "FP_kill": "approved admin group changes (ticketed); PIM/JIT just-in-time elevation; GPO edits by designated GPO admins in a change window; AAD Connect / backup machine-account operations; AD CS auto-enrollment of standard machine/user certs"
+  },
+  "false_positive_checks": [
+    "approved/ticketed admin-group membership changes and PIM/JIT just-in-time role activation",
+    "designated GPO administrators editing GPOs during a change window",
+    "AAD Connect sync (MSOL_*/AAD_*) and backup service machine-account operations",
+    "AD CS auto-enrollment issuing routine machine/user certificates (template + requester==subject)",
+    "tier-0 admin accounts that legitimately hold special privileges (baseline the account)"
+  ],
+  "evidence_capture": ["entity", "escalation_vector", "group_or_object", "subject_who_changed", "was_previously_privileged", "computer_account_anomaly", "adcs_template", "preceding_compromise", "kerberos_gap_note", "first_ts", "last_ts"],
+  "output_findings_json": {
+    "surface": "windows",
+    "source": "host",
+    "mitre": "T1078.002, T1098, T1484.001, T1068",
+    "tactic": "TA0004 Privilege Escalation",
+    "killchain": "Exploitation -> Installation",
+    "query_template": "winlogbeat_winlog_event_id:(4728 OR 4732 OR 4756 OR 5136 OR 4742 OR 4741) AND winlogbeat_winlog_channel:Security"
+  }
+}

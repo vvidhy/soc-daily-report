@@ -1,0 +1,67 @@
+{
+  "module": "beaconing-c2",
+  "version": "1.0",
+  "technique": "C2 beaconing over allowed egress",
+  "mitre": ["T1071", "T1095"],
+  "tactic": "TA0011 Command and Control",
+  "surface": "firewall",
+  "applies_to_gl": ["AZ-GL", "PROD-GL", "DEV-GL", "OP-GL"],
+  "trigger": {
+    "from_breadth": "An internal srcip with repetitive outbound ACCEPT to a single external dstip (Surface-6 O7), OR run on top-N outbound talkers",
+    "entity": "srcip+dstip pair"
+  },
+  "telemetry_required": ["FortiGate action, srcip, dstip, dstport, sentbyte, rcvdbyte, sessionid + per-session timestamps"],
+  "telemetry_gap_behavior": "FortiGate is the best-parsed surface (all 4 live) so data exists; if the device source is missing use devname/policyid fallback. Never infer beaconing from denied sessions only.",
+  "inputs": { "srcip": "<host from lead>", "dstip": "<external dst from lead>", "window_seconds": 86400 },
+  "method": [
+    {
+      "step": 1,
+      "goal": "Pull the conversation",
+      "query": "srcip:<srcip> AND dstip:<dstip> AND action:accept",
+      "compute": "ordered list of session timestamps + sentbyte + rcvdbyte; total connection count"
+    },
+    {
+      "step": 2,
+      "goal": "Periodicity test (the math breadth cannot do by eye)",
+      "compute": "inter-arrival deltas between consecutive sessions; mean interval; stddev; jitter = coefficient of variation (CoV) = stddev/mean",
+      "threshold": "CoV < 0.15 = strong beacon (metronomic); 0.15-0.35 = jittered beacon (still suspicious); > 0.35 = not periodic"
+    },
+    {
+      "step": 3,
+      "goal": "Payload-regularity test",
+      "compute": "mean + stddev of sentbyte across sessions",
+      "threshold": "small + low-variance payload (consistent check-in size) corroborates beacon; large/variable = likely legit transfer"
+    },
+    {
+      "step": 4,
+      "goal": "Count gate (exclude trivially-rare and chatty-app noise)",
+      "threshold": "10 < connection_count < ~2000 in 24h"
+    },
+    {
+      "step": 5,
+      "goal": "Destination enrichment",
+      "compute": "dstcountry; ASN/org; hosting/VPN/Tor/newly-registered; non-standard dstport (4444 5555 6666 6969 9001 9030 31337)",
+      "decision_input": "non-allowlisted + hosting/Tor ASN or odd port = elevate"
+    }
+  ],
+  "decision": {
+    "CRITICAL_conf5": "low-jitter periodic external beacon to Tor/known-bad ASN, OR same host has a paired ESET/endpoint detection (cross-surface chain)",
+    "HIGH_conf4": "CoV < 0.15 + consistent small payload + external non-allowlisted dst = C2",
+    "MEDIUM_conf3": "CoV 0.15-0.35 jittered pattern to a non-allowlisted dst",
+    "FP_kill": "dst is Zscaler / Cato / Windows Update / MS telemetry / NTP / known SaaS / internal monitoring collector"
+  },
+  "false_positive_checks": [
+    "Zscaler egress 136.226.x / 165.225.x ; Cato egress IPs -> cap, expected periodic",
+    "Windows Update / Microsoft telemetry / Office CDN ranges",
+    "NTP (123) and internal monitoring/heartbeat collectors",
+    "backup / replication jobs (regular by design) -> confirm dst is a sanctioned backup target"
+  ],
+  "evidence_capture": ["srcip","dstip","dstcountry","asn","conn_count","interval_mean_s","jitter_cov","payload_mean_bytes","dstport"],
+  "output_findings_json": {
+    "surface": "firewall",
+    "mitre": "T1071, T1095",
+    "tactic": "TA0011 Command and Control",
+    "killchain": "C2",
+    "query_template": "srcip:<srcip> AND dstip:<dstip> AND action:accept"
+  }
+}
